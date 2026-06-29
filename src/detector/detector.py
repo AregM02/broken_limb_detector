@@ -22,6 +22,8 @@ from src.skeletons.natnet_skeleton import (
     extract_positions,
     extract_gravity
 )
+from src.skeletons.tf import WNN_R_WSS
+from src.utils.gravity import estimate_gravity_nn_R_ss
 from src.utils.transforms import global_to_local
 from src.utils.visualization import plot_bone_with_violations
 
@@ -124,17 +126,15 @@ class GravityAlignmentChecker(BaseChecker):
     Compares the orientation of the tracking bone frame against IMU gravity.
     Defaults to Z-axis (2) for gravity alignment.
     """
-    def __init__(self, threshold_cos: float = 0.985):
+    def __init__(
+        self,
+        threshold_cos: float = 0.985,
+        calibration_start: int = 0,
+        calibration_window: int = 600,
+    ):
         self.threshold_cos = threshold_cos
-        # Standard Mocap -> Sensor alignment matrix
-        # Right-side transform
-        self.nn_R_ss_right = np.array([[0,  1,  0],
-                                       [0,  0,  1],
-                                       [1,  0,  0]])
-        # Left-side transform
-        self.nn_R_ss_left = np.array([[0,  -1,  0],
-                                      [0,  0,  1],
-                                      [-1,  0,  0]])
+        self.calibration_start = calibration_start
+        self.calibration_window = calibration_window
 
     def check(self, df: pd.DataFrame) -> CheckerResult:
         n_frames = len(df)
@@ -147,24 +147,28 @@ class GravityAlignmentChecker(BaseChecker):
             if bone_ss is None:
                 continue 
 
-            # Select the correct alignment matrix based on side
-            nn_R_ss = self.nn_R_ss_left if bone_nn.startswith('L') else self.nn_R_ss_right
-
             try:
-                q_nn = extract_rotations(df, [bone_nn], stream='natnet').squeeze()
-                q_ss = extract_rotations(df, [bone_ss], suffix='rotation', stream='sensorsuit').squeeze()
-                g_ss = extract_gravity(df, [bone_ss], stream="sensorsuit").squeeze()
+                q_nn = extract_rotations(df, [bone_nn], stream='natnet')[:, 0]
+                q_ss = extract_rotations(df, [bone_ss], suffix='rotation', stream='sensorsuit')[:, 0]
+                g_ss = extract_gravity(df, [bone_ss], stream="sensorsuit")[:, 0]
                 
                 # Align SS gravity to World frame via NatNet/Mocap rotation
                 w_R_nn = Rotation.from_quat(q_nn).as_matrix()
+                w_R_ss = Rotation.from_quat(q_ss).as_matrix()
+                nn_R_ss = estimate_gravity_nn_R_ss(
+                    w_R_nn,
+                    w_R_ss,
+                    g_ss,
+                    start_frame=self.calibration_start,
+                    calibration_window=self.calibration_window,
+                )
                 g_nn = np.einsum('ij,nj->ni', nn_R_ss, g_ss)
                 g_w = np.einsum('nij,nj->ni', w_R_nn, g_nn)
 
                 # Reference gravity (The "Truth" vector in world frame)
-                # We expect the sensor gravity to transform into the World Z-axis (or configured axis)
-                w_R_ss = Rotation.from_quat(q_ss).as_matrix()
+                # Keep local SensorSuit->NatNet and SensorSuit-world->NatNet-world separate.
                 g_true = np.einsum('nij,nj->ni', w_R_ss, g_ss)
-                g_true = np.einsum('ij,nj->ni', nn_R_ss, g_true)
+                g_true = np.einsum('ij,nj->ni', WNN_R_WSS, g_true)
 
                 # Robust Angle Calculation
                 # Normalize vectors to ensure we are only comparing direction
@@ -309,7 +313,10 @@ if __name__ == "__main__":
     # Initialize active pipelines
     active_checkers: list[BaseChecker] = [
         AbsoluteLimitChecker(calibrate=args.calibrate, tpose_window=args.tpose_window),
-        GravityAlignmentChecker(threshold_cos=args.gravity_threshold)
+        GravityAlignmentChecker(
+            threshold_cos=args.gravity_threshold,
+            calibration_window=args.tpose_window,
+        )
     ]
 
     result = detect_breaks(df, checkers=active_checkers)
