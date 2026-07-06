@@ -7,18 +7,20 @@ import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.spatial.transform import Rotation
 
 from src.detector.checkers import AbsoluteLimitChecker, BaseChecker, GravityAlignmentChecker
 from src.detector.detector import detect_breaks, format_report
 from src.skeletons.natnet_skeleton import NATNET, extract_positions, extract_rotations
 from src.utils.gravity import compute_gravity_vectors, cosine_similarity
+from src.utils.transforms import global_to_local
 from src.utils.visualization import plot_bone_with_violations, plot_skeleton
 
 
 def load_gravity_overlays(
     df: pd.DataFrame,
     *,
-    sensorsuit_suffix: str = "rotation",
+    sensorsuit_suffix: str = "auto",
     calibration_start: int = 0,
     calibration_window: int = 600,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, str]]:
@@ -126,12 +128,12 @@ def run_detect(args: argparse.Namespace) -> None:
     df = pd.read_parquet(args.parquet_path)
     checkers: list[BaseChecker] = [
         AbsoluteLimitChecker(calibrate=args.calibrate, tpose_window=args.tpose_window),
-        GravityAlignmentChecker(
-            threshold_cos=args.gravity_threshold,
-            calibration_start=args.calibration_start,
-            calibration_window=args.calibration_window,
-            sensorsuit_suffix=args.sensorsuit_suffix,
-        ),
+        # GravityAlignmentChecker(
+        #     threshold_cos=args.gravity_threshold,
+        #     calibration_start=args.calibration_start,
+        #     calibration_window=args.calibration_window,
+        #     sensorsuit_suffix=args.sensorsuit_suffix,
+        # ),
     ]
 
     result = detect_breaks(df, checkers=checkers)
@@ -141,19 +143,32 @@ def run_detect(args: argparse.Namespace) -> None:
         return
 
     rpy_result = result.checker_results.get("AbsoluteLimitChecker")
-    if rpy_result is None:
+    gravity_result = result.checker_results.get("GravityAlignmentChecker")
+    if rpy_result is None and gravity_result is None:
         return
 
-    gravity_result = result.checker_results.get("GravityAlignmentChecker")
     gravity_violated = None if gravity_result is None else gravity_result.violated
-    for bone_name, limits in rpy_result.details["limits"].items():
+    if rpy_result is None:
+        quats = extract_rotations(df, list(NATNET.names))
+        pos = extract_positions(df, list(NATNET.names))
+        local_quats, _ = global_to_local(quats, pos)
+        rpy = Rotation.from_quat(local_quats).as_euler("xyz", degrees=True)
+        plot_items = [(bone_name, None) for bone_name in gravity_result.details["bones"]]
+        violated_axes = None
+    else:
+        rpy = result.rpy
+        plot_items = rpy_result.details["limits"].items()
+        violated_axes = result.violated_axes
+
+    for bone_name, limits in plot_items:
         plot_bone_with_violations(
             bone_name,
             violated=result.violated,
-            violated_axes=result.violated_axes,
+            violated_axes=violated_axes,
             limits=limits,
-            rpy=result.rpy,
+            rpy=rpy,
             gravity_violated=gravity_violated,
+            plot_broken_edges=args.plot_broken_edges,
         )
 
 
@@ -162,8 +177,8 @@ def add_gravity_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--calibration-window", type=int, default=600)
     parser.add_argument(
         "--sensorsuit-suffix",
-        default="rotation",
-        help="SensorSuit quaternion suffix in the parquet columns.",
+        default="auto",
+        help="SensorSuit quaternion suffix in the parquet columns: auto, orientation, or rotation.",
     )
 
 
@@ -181,6 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--gravity-threshold", type=float, default=0.8)
     detect.add_argument("--max-rows", type=int, default=20)
     detect.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
+    detect.add_argument(
+        "--plot-broken-edges",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Draw debounced broken_start/broken_end vertical markers.",
+    )
     add_gravity_args(detect)
     detect.set_defaults(handler=run_detect)
 

@@ -12,6 +12,7 @@ from src.detector.checkers import (
     AbsoluteLimitChecker,
     BaseChecker,
     CheckerResult,
+    END_EFFECTOR_BONES,
     GravityAlignmentChecker,
 )
 from src.skeletons.natnet_skeleton import NATNET
@@ -108,6 +109,7 @@ __all__ = [
     "AbsoluteLimitChecker",
     "BaseChecker",
     "CheckerResult",
+    "END_EFFECTOR_BONES",
     "DetectionResult",
     "GravityAlignmentChecker",
     "default_checkers",

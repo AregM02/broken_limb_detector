@@ -22,6 +22,7 @@ from src.utils.gravity import (
     available_natnet_to_sensorsuit,
     estimate_gravity_nn_R_ss,
     normalize_vectors,
+    resolve_sensorsuit_suffix,
 )
 
 
@@ -71,12 +72,13 @@ def estimate_one_gravity_transform(
     start_frame: int = 0,
     calibration_window: int = 600,
     wnn_R_wss: np.ndarray | None = None,
-    sensorsuit_suffix: str = "rotation",
+    sensorsuit_suffix: str = "auto",
 ) -> GravityTransformEstimate:
     if bone_nn is None:
         bone_nn = SENSORSUIT_TO_NATNET[bone_ss]
     if wnn_R_wss is None:
         wnn_R_wss = WNN_R_WSS
+    sensorsuit_suffix = resolve_sensorsuit_suffix(df, sensorsuit_suffix)
 
     q_nn = extract_rotations(df, [bone_nn], stream="natnet")
     q_ss = extract_rotations(df, [bone_ss], stream="sensorsuit", suffix=sensorsuit_suffix)
@@ -128,7 +130,7 @@ def estimate_gravity_transforms(
     start_frame: int = 0,
     calibration_window: int = 600,
     wnn_R_wss: np.ndarray | None = None,
-    sensorsuit_suffix: str = "rotation",
+    sensorsuit_suffix: str = "auto",
 ) -> dict[str, GravityTransformEstimate]:
     if bones_ss is None:
         mapping = available_natnet_to_sensorsuit(df, sensorsuit_suffix=sensorsuit_suffix)
@@ -182,8 +184,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--sensorsuit-suffix",
-        default="rotation",
-        help="SensorSuit quaternion suffix, usually 'rotation' for processed parquet files.",
+        default="auto",
+        help="SensorSuit quaternion suffix: auto, orientation, or rotation.",
     )
     args = parser.parse_args()
 

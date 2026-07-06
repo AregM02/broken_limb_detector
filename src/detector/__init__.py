@@ -5,6 +5,7 @@ from src.detector.checkers import (
     AbsoluteLimitChecker,
     BaseChecker,
     CheckerResult,
+    END_EFFECTOR_BONES,
     GravityAlignmentChecker,
 )
 from src.detector.detector import DetectionResult, default_checkers, detect_breaks, format_report
@@ -14,6 +15,7 @@ __all__ = [
     "AbsoluteLimitChecker",
     "BaseChecker",
     "CheckerResult",
+    "END_EFFECTOR_BONES",
     "DetectionResult",
     "GravityAlignmentChecker",
     "default_checkers",

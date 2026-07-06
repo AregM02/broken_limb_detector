@@ -11,6 +11,6 @@ python main.py cosine parquets/test_rhand.processed.parquet --bone RHand --thres
 
 Commands:
 
-- `detect`: run the RPY limit checker and gravity alignment checker.
+- `detect`: run the RPY limit checker and hand/foot gravity alignment checker.
 - `skeleton`: plot the NatNet skeleton with gravity overlays.
 - `cosine`: plot gravity-fit cosine similarity over time.

@@ -11,6 +11,39 @@ _AXIS_LEN = 0.15
 _GRAVITY_LEN = 0.2
 
 
+def _debounced_true_edges(mask: np.ndarray, off_gap: int) -> tuple[list[int], list[int]]:
+    """Return true-run starts and confirmed ends, merging short false gaps."""
+
+    starts: list[int] = []
+    ends: list[int] = []
+    in_run = False
+    pending_end: int | None = None
+    off_count = 0
+
+    for frame, is_on in enumerate(np.asarray(mask, dtype=bool)):
+        if is_on:
+            if not in_run:
+                starts.append(frame)
+                in_run = True
+            pending_end = None
+            off_count = 0
+            continue
+
+        if not in_run:
+            continue
+
+        if pending_end is None:
+            pending_end = frame
+        off_count += 1
+        if off_count >= off_gap:
+            ends.append(pending_end)
+            in_run = False
+            pending_end = None
+            off_count = 0
+
+    return starts, ends
+
+
 def plot_skeleton(
     pos: np.ndarray,
     ori: np.ndarray,
@@ -357,6 +390,8 @@ def plot_bone_with_violations(
     rpy: np.ndarray | None = None,
     gravity_violated: np.ndarray | None = None,
     figsize: tuple[float, float] = (12, 6),
+    broken_end_off_gap: int = 1000,
+    plot_broken_edges: bool = True,
 ) -> None:
     """Time series of roll/pitch/yaw for one bone with violation markers.
 
@@ -385,6 +420,11 @@ def plot_bone_with_violations(
         alignment violations.  Drawn as blue vertical spans.
     figsize:
         Figure size passed to ``plt.figure()``.
+    broken_end_off_gap:
+        Number of consecutive non-broken frames required before drawing a
+        ``broken_end`` marker. Shorter off-gaps are treated as oscillation.
+    plot_broken_edges:
+        Draw debounced ``broken_start`` and ``broken_end`` vertical markers.
     """
     child_idx = NATNET.index(child_name)
 
@@ -394,19 +434,21 @@ def plot_bone_with_violations(
         angles = Rotation.from_quat(local_quats[:, child_idx, None]).as_euler('xyz', degrees=True)[:, 0, :]
 
     n_frames = len(angles)
+    if violated is not None:
+        if violated.ndim == 2:
+            bone_mask = violated[:, child_idx]
+        else:
+            bone_mask = violated
+        bone_mask = np.asarray(bone_mask, dtype=bool)
+    else:
+        bone_mask = None
+
     if violated_axes is not None:
         if violated_axes.ndim == 3:
             ax_masks = violated_axes[:, child_idx, :]
         else:
             ax_masks = violated_axes
-    elif violated is not None:
-        if violated.ndim == 2:
-            bone_mask = violated[:, child_idx]
-        else:
-            bone_mask = violated
-        ax_masks = None
     else:
-        bone_mask = None
         ax_masks = None
 
     if gravity_violated is not None:
@@ -420,6 +462,20 @@ def plot_bone_with_violations(
     colors = ["#d62728", "#2ca02c", "#1f77b4"]
     axis_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
     limit_labels = ["r", "p", "y"]
+
+    broken_starts: list[int] = []
+    broken_ends: list[int] = []
+    marker_mask = None
+    if plot_broken_edges:
+        marker_mask = bone_mask if bone_mask is not None else None
+        if marker_mask is None and ax_masks is not None:
+            marker_mask = np.any(ax_masks, axis=1)
+
+    if plot_broken_edges and marker_mask is not None:
+        broken_starts, broken_ends = _debounced_true_edges(
+            marker_mask,
+            max(1, int(broken_end_off_gap)),
+        )
 
     fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
     fig.suptitle(f"{child_name} — RPY time series", fontsize=13)
@@ -455,7 +511,30 @@ def plot_bone_with_violations(
             ax.axhline(limits[axis_idx][0], color=color, ls="--", lw=0.8, alpha=0.6)
             ax.axhline(limits[axis_idx][1], color=color, ls="--", lw=0.8, alpha=0.6)
 
+        for idx, start in enumerate(broken_starts):
+            ax.axvline(
+                start,
+                color="black",
+                ls="--",
+                lw=1.0,
+                alpha=0.85,
+                zorder=4,
+                label="broken_start" if ax is axes[0] and idx == 0 else "_nolegend_",
+            )
+        for idx, end in enumerate(broken_ends):
+            ax.axvline(
+                end,
+                color="dimgray",
+                ls="--",
+                lw=1.0,
+                alpha=0.85,
+                zorder=4,
+                label="broken_end" if ax is axes[0] and idx == 0 else "_nolegend_",
+            )
+
     axes[-1].set_xlabel("Frame")
+    if broken_starts or broken_ends:
+        axes[0].legend(loc="upper right", fontsize=8)
 
     plt.tight_layout()
     plt.show()
