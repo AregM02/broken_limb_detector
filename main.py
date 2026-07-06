@@ -1,80 +1,42 @@
+"""Single CLI entry point for detection and gravity diagnostics."""
+
+from __future__ import annotations
+
 import argparse
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.spatial.transform import Rotation
 
-from src.skeletons.natnet_skeleton import (
-    NATNET,
-    extract_gravity,
-    extract_positions,
-    extract_rotations,
-)
-from src.skeletons.tf import WNN_R_WSS
-from src.utils.gravity import available_natnet_to_sensorsuit, estimate_gravity_nn_R_ss
-from src.utils.visualization import plot_skeleton
+from src.detector.checkers import AbsoluteLimitChecker, BaseChecker, GravityAlignmentChecker
+from src.detector.detector import detect_breaks, format_report
+from src.skeletons.natnet_skeleton import NATNET, extract_positions, extract_rotations
+from src.utils.gravity import compute_gravity_vectors, cosine_similarity
+from src.utils.visualization import plot_bone_with_violations, plot_skeleton
 
 
-def compute_gravity_overlays(
+def load_gravity_overlays(
     df: pd.DataFrame,
     *,
     sensorsuit_suffix: str = "rotation",
     calibration_start: int = 0,
     calibration_window: int = 600,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, str]]:
-    """Build skeleton arrays plus NatNet-path and SensorSuit-path gravity vectors.
+    """Load NatNet pose arrays and fitted gravity overlay vectors."""
 
-    ``gravity`` is local IMU gravity rotated through NatNet's bone orientation.
-    The intermediate SensorSuit->NatNet transform is fitted from the initial
-    T-pose using gravity directions only. ``gravity_ref`` is local
-    IMU gravity rotated through the SensorSuit quaternion and then converted
-    from SensorSuit world to NatNet world.
-    """
-
-    bones_nn = list(NATNET.names)
-    pos = extract_positions(df, bones_nn, stream="natnet")
-    ori = extract_rotations(df, bones_nn, stream="natnet")
+    bones = list(NATNET.names)
+    pos = extract_positions(df, bones, stream="natnet")
+    ori = extract_rotations(df, bones, stream="natnet")
     if ori.shape[1] != len(NATNET):
         raise ValueError("missing one or more NatNet rotation columns")
 
-    n_frames = len(df)
-    n_bones = len(NATNET)
-    gravity = np.zeros((n_frames, n_bones, 3))
-    gravity_ref = np.zeros((n_frames, n_bones, 3))
-    mapping = available_natnet_to_sensorsuit(df, sensorsuit_suffix=sensorsuit_suffix)
-
-    for bone_idx, bone_nn in enumerate(bones_nn):
-        bone_ss = mapping.get(bone_nn)
-        if bone_ss is None:
-            continue
-
-        q_ss = extract_rotations(
-            df,
-            [bone_ss],
-            stream="sensorsuit",
-            suffix=sensorsuit_suffix,
-        )
-        g_ss = extract_gravity(df, [bone_ss], stream="sensorsuit")
-        if q_ss.shape[1] == 0 or g_ss.shape[1] == 0:
-            continue
-
-        wnn_R_nn = Rotation.from_quat(ori[:, bone_idx]).as_matrix()
-        wss_R_ss = Rotation.from_quat(q_ss[:, 0]).as_matrix()
-        g_ss = g_ss[:, 0]
-        nn_R_ss = estimate_gravity_nn_R_ss(
-            wnn_R_nn,
-            wss_R_ss,
-            g_ss,
-            start_frame=calibration_start,
-            calibration_window=calibration_window,
-        )
-
-        g_nn = np.einsum("ij,nj->ni", nn_R_ss, g_ss)
-        gravity[:, bone_idx] = np.einsum("nij,nj->ni", wnn_R_nn, g_nn)
-
-        g_wss = np.einsum("nij,nj->ni", wss_R_ss, g_ss)
-        gravity_ref[:, bone_idx] = np.einsum("ij,nj->ni", WNN_R_WSS, g_wss)
-
+    gravity, gravity_ref, mapping = compute_gravity_vectors(
+        df,
+        sensorsuit_suffix=sensorsuit_suffix,
+        calibration_start=calibration_start,
+        calibration_window=calibration_window,
+        natnet_rotations=ori,
+    )
     return pos, ori, gravity, gravity_ref, mapping
 
 
@@ -86,35 +48,19 @@ def normalize_frame(frame: int, n_frames: int) -> int:
     return frame
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Plot NatNet skeleton with two SensorSuit gravity overlays.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("parquet_path")
-    parser.add_argument(
-        "--frame",
-        type=int,
-        action="append",
-        help="Frame to plot. Repeat this option to show multiple frames.",
-    )
-    parser.add_argument("--gravity-len", type=float, default=0.2)
-    parser.add_argument("--calibration-start", type=int, default=0)
-    parser.add_argument("--calibration-window", type=int, default=600)
-    parser.add_argument(
-        "--sensorsuit-suffix",
-        default="rotation",
-        help="SensorSuit quaternion suffix in the parquet columns.",
-    )
-    parser.add_argument(
-        "--print-mapping",
-        action="store_true",
-        help="Print the NatNet bone -> SensorSuit bone mapping used for gravity overlays.",
-    )
-    args = parser.parse_args()
+def resolve_bones(names: list[str]) -> list[int]:
+    indices: list[int] = []
+    for name in names:
+        if name not in NATNET.names:
+            valid = ", ".join(NATNET.names)
+            raise ValueError(f"unknown NatNet bone {name!r}; valid bones: {valid}")
+        indices.append(NATNET.index(name))
+    return indices
 
+
+def run_skeleton(args: argparse.Namespace) -> None:
     df = pd.read_parquet(args.parquet_path)
-    pos, ori, gravity, gravity_ref, mapping = compute_gravity_overlays(
+    pos, ori, gravity, gravity_ref, mapping = load_gravity_overlays(
         df,
         sensorsuit_suffix=args.sensorsuit_suffix,
         calibration_start=args.calibration_start,
@@ -137,6 +83,130 @@ def main() -> None:
             gravity_ref=gravity_ref,
             gravity_len=args.gravity_len,
         )
+
+
+def run_cosine(args: argparse.Namespace) -> None:
+    df = pd.read_parquet(args.parquet_path)
+    bone_names = args.bone if args.bone is not None else ["RHand"]
+    bone_indices = resolve_bones(bone_names)
+    _, _, gravity, gravity_ref, _ = load_gravity_overlays(
+        df,
+        sensorsuit_suffix=args.sensorsuit_suffix,
+        calibration_start=args.calibration_start,
+        calibration_window=args.calibration_window,
+    )
+
+    start = max(args.start, 0)
+    end = len(df) if args.end is None else min(args.end, len(df))
+    if start >= end:
+        raise ValueError("empty frame range")
+
+    frames = np.arange(start, end)
+    fig, axes = plt.subplots(len(bone_indices), 1, figsize=(14, 3.5 * len(bone_indices)), sharex=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, bone_idx, bone_name in zip(axes, bone_indices, bone_names):
+        cos_gravity = cosine_similarity(gravity[:, bone_idx], gravity_ref[:, bone_idx])
+        ax.plot(frames, cos_gravity[start:end], label="gravity-fit NN_R_SS", lw=1.0)
+        if args.threshold is not None:
+            ax.axhline(args.threshold, color="black", linestyle="--", linewidth=0.8, label="threshold")
+        ax.set_ylabel("cosine")
+        ax.set_ylim(-1.05, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.set_title(bone_name)
+        ax.legend(loc="lower right")
+
+    axes[-1].set_xlabel("frame")
+    fig.suptitle("Gravity Cosine Similarity: NatNet Path vs SensorSuit Reference", y=0.995)
+    fig.tight_layout()
+    plt.show()
+
+
+def run_detect(args: argparse.Namespace) -> None:
+    df = pd.read_parquet(args.parquet_path)
+    checkers: list[BaseChecker] = [
+        AbsoluteLimitChecker(calibrate=args.calibrate, tpose_window=args.tpose_window),
+        GravityAlignmentChecker(
+            threshold_cos=args.gravity_threshold,
+            calibration_start=args.calibration_start,
+            calibration_window=args.calibration_window,
+            sensorsuit_suffix=args.sensorsuit_suffix,
+        ),
+    ]
+
+    result = detect_breaks(df, checkers=checkers)
+    print(format_report(result, max_rows=args.max_rows))
+
+    if not args.plot:
+        return
+
+    rpy_result = result.checker_results.get("AbsoluteLimitChecker")
+    if rpy_result is None:
+        return
+
+    gravity_result = result.checker_results.get("GravityAlignmentChecker")
+    gravity_violated = None if gravity_result is None else gravity_result.violated
+    for bone_name, limits in rpy_result.details["limits"].items():
+        plot_bone_with_violations(
+            bone_name,
+            violated=result.violated,
+            violated_axes=result.violated_axes,
+            limits=limits,
+            rpy=result.rpy,
+            gravity_violated=gravity_violated,
+        )
+
+
+def add_gravity_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--calibration-start", type=int, default=0)
+    parser.add_argument("--calibration-window", type=int, default=600)
+    parser.add_argument(
+        "--sensorsuit-suffix",
+        default="rotation",
+        help="SensorSuit quaternion suffix in the parquet columns.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Broken-limb detector and gravity diagnostics.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    detect = subparsers.add_parser("detect", help="Run the break detector.")
+    detect.add_argument("parquet_path")
+    detect.add_argument("--calibrate", action=argparse.BooleanOptionalAction, default=False)
+    detect.add_argument("--tpose-window", type=int, default=600)
+    detect.add_argument("--gravity-threshold", type=float, default=0.8)
+    detect.add_argument("--max-rows", type=int, default=20)
+    detect.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
+    add_gravity_args(detect)
+    detect.set_defaults(handler=run_detect)
+
+    skeleton = subparsers.add_parser("skeleton", help="Plot skeleton with gravity overlays.")
+    skeleton.add_argument("parquet_path")
+    skeleton.add_argument("--frame", type=int, action="append", help="Frame to plot; repeat for multiple frames.")
+    skeleton.add_argument("--gravity-len", type=float, default=0.2)
+    skeleton.add_argument("--print-mapping", action="store_true")
+    add_gravity_args(skeleton)
+    skeleton.set_defaults(handler=run_skeleton)
+
+    cosine = subparsers.add_parser("cosine", help="Plot gravity cosine similarity.")
+    cosine.add_argument("parquet_path")
+    cosine.add_argument("--bone", action="append", default=None, help="NatNet bone to plot; repeat for more.")
+    cosine.add_argument("--start", type=int, default=0)
+    cosine.add_argument("--end", type=int, default=None)
+    cosine.add_argument("--threshold", type=float, default=None)
+    add_gravity_args(cosine)
+    cosine.set_defaults(handler=run_cosine)
+
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.handler(args)
 
 
 if __name__ == "__main__":

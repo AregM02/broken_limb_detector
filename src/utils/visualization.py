@@ -23,12 +23,10 @@ def plot_skeleton(
     """Draw a 3D skeleton with bone connections, joint axes, labels, and
     optional gravity arrows.
 
-    When *gravity* is provided, each bone gets a blue arrow showing the
-    **world-frame** gravity direction.  The caller is responsible for
-    providing gravity already expressed in the **world** frame — typically
-    by rotating the sensorsuit's local gravity measurement with the
-    **sensorsuit's own** orientation quaternion (not the NatNet bone
-    orientation, since the IMU and bone frames differ).
+    When *gravity* is provided, each bone gets a blue arrow showing a
+    world-frame gravity direction.  In the current pipeline this is the
+    NatNet path: local IMU gravity is mapped through the fitted SensorSuit ->
+    NatNet local transform and then through the NatNet bone orientation.
 
     In a correctly tracked skeleton all gravity arrows should point
     consistently.  A bone whose orientation estimate is broken will show
@@ -47,8 +45,8 @@ def plot_skeleton(
         ``(n_bones, 3)`` it is used directly.
     gravity_ref:
         (n_frames, n_bones, 3) or (n_bones, 3) reference gravity vectors
-        (e.g. gravity predicted from the sensor suit's own orientation).
-        Drawn as cyan arrows at each joint for comparison.
+        Reference gravity from the SensorSuit orientation path, converted into
+        NatNet world coordinates. Drawn as cyan arrows for comparison.
     gravity_len:
         Display length of the gravity arrows (in data coordinates).
     figsize:
@@ -515,4 +513,3 @@ def plot_nn_vs_ss(
     axes[-1].set_xlabel("Frame")
     fig.suptitle("NN (solid) vs SS (dashed)", fontsize=13)
     plt.show()
-
