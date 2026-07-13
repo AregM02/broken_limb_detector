@@ -93,20 +93,18 @@ class AbsoluteLimitChecker(BaseChecker):
 
 
 class GravityAlignmentChecker(BaseChecker):
-    """Compare the gravity-fit NatNet path against the SensorSuit gravity path."""
+    """Compare the gravity-fit NatNet path against constant NatNet-world gravity."""
 
     def __init__(
         self,
         threshold_cos: float = 0.8,
         calibration_start: int = 0,
         calibration_window: int = 600,
-        sensorsuit_suffix: str = "auto",
         bones: tuple[str, ...] | list[str] | None = None,
     ):
         self.threshold_cos = threshold_cos
         self.calibration_start = calibration_start
         self.calibration_window = calibration_window
-        self.sensorsuit_suffix = sensorsuit_suffix
         self.bones = END_EFFECTOR_BONES if bones is None else tuple(bones)
         for bone in self.bones:
             if bone not in NATNET.names:
@@ -115,7 +113,6 @@ class GravityAlignmentChecker(BaseChecker):
     def check(self, df: pd.DataFrame) -> CheckerResult:
         gravity, gravity_ref, mapping = compute_gravity_vectors(
             df,
-            sensorsuit_suffix=self.sensorsuit_suffix,
             calibration_start=self.calibration_start,
             calibration_window=self.calibration_window,
             bone_names=self.bones,

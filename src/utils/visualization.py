@@ -77,9 +77,8 @@ def plot_skeleton(
         (n_frames, n_bones, 3) **world-frame** gravity vectors.  If 2-D
         ``(n_bones, 3)`` it is used directly.
     gravity_ref:
-        (n_frames, n_bones, 3) or (n_bones, 3) reference gravity vectors
-        Reference gravity from the SensorSuit orientation path, converted into
-        NatNet world coordinates. Drawn as cyan arrows for comparison.
+        (n_frames, n_bones, 3) or (n_bones, 3) NatNet-world reference gravity
+        vectors. Drawn as cyan arrows for comparison.
     gravity_len:
         Display length of the gravity arrows (in data coordinates).
     figsize:

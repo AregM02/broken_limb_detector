@@ -20,7 +20,6 @@ from src.utils.visualization import plot_bone_with_violations, plot_skeleton
 def load_gravity_overlays(
     df: pd.DataFrame,
     *,
-    sensorsuit_suffix: str = "auto",
     calibration_start: int = 0,
     calibration_window: int = 600,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, str]]:
@@ -34,7 +33,6 @@ def load_gravity_overlays(
 
     gravity, gravity_ref, mapping = compute_gravity_vectors(
         df,
-        sensorsuit_suffix=sensorsuit_suffix,
         calibration_start=calibration_start,
         calibration_window=calibration_window,
         natnet_rotations=ori,
@@ -64,7 +62,6 @@ def run_skeleton(args: argparse.Namespace) -> None:
     df = pd.read_parquet(args.parquet_path)
     pos, ori, gravity, gravity_ref, mapping = load_gravity_overlays(
         df,
-        sensorsuit_suffix=args.sensorsuit_suffix,
         calibration_start=args.calibration_start,
         calibration_window=args.calibration_window,
     )
@@ -93,7 +90,6 @@ def run_cosine(args: argparse.Namespace) -> None:
     bone_indices = resolve_bones(bone_names)
     _, _, gravity, gravity_ref, _ = load_gravity_overlays(
         df,
-        sensorsuit_suffix=args.sensorsuit_suffix,
         calibration_start=args.calibration_start,
         calibration_window=args.calibration_window,
     )
@@ -119,7 +115,7 @@ def run_cosine(args: argparse.Namespace) -> None:
         ax.legend(loc="lower right")
 
     axes[-1].set_xlabel("frame")
-    fig.suptitle("Gravity Cosine Similarity: NatNet Path vs SensorSuit Reference", y=0.995)
+    fig.suptitle("Gravity Cosine Similarity: NatNet Path vs NatNet +Y", y=0.995)
     fig.tight_layout()
     plt.show()
 
@@ -128,12 +124,11 @@ def run_detect(args: argparse.Namespace) -> None:
     df = pd.read_parquet(args.parquet_path)
     checkers: list[BaseChecker] = [
         AbsoluteLimitChecker(calibrate=args.calibrate, tpose_window=args.tpose_window),
-        # GravityAlignmentChecker(
-        #     threshold_cos=args.gravity_threshold,
-        #     calibration_start=args.calibration_start,
-        #     calibration_window=args.calibration_window,
-        #     sensorsuit_suffix=args.sensorsuit_suffix,
-        # ),
+        GravityAlignmentChecker(
+            threshold_cos=args.gravity_threshold,
+            calibration_start=args.calibration_start,
+            calibration_window=args.calibration_window,
+        ),
     ]
 
     result = detect_breaks(df, checkers=checkers)
@@ -175,11 +170,6 @@ def run_detect(args: argparse.Namespace) -> None:
 def add_gravity_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--calibration-start", type=int, default=0)
     parser.add_argument("--calibration-window", type=int, default=600)
-    parser.add_argument(
-        "--sensorsuit-suffix",
-        default="auto",
-        help="SensorSuit quaternion suffix in the parquet columns: auto, orientation, or rotation.",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
