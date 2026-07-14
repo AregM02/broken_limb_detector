@@ -1,12 +1,13 @@
 [project]
 name = "break-detector"
 version = "0.1.0"
-description = "Add your description here"
+description = "OptiTrack broken limb detector"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastparquet>=2026.5.0",
     "matplotlib>=3.11.0",
     "pandas>=3.0.3",
+    "scikit-learn>=1.8.0",
     "scipy>=1.18.0",
 ]
