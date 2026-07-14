@@ -1,7 +1,6 @@
-import matplotlib
-# matplotlib.use('gtk3agg')
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.spatial import geometric_slerp
 from scipy.spatial.transform import Rotation
 from src.skeletons.natnet_skeleton import NATNET, LINKS
 
@@ -44,13 +43,31 @@ def _debounced_true_edges(mask: np.ndarray, off_gap: int) -> tuple[list[int], li
     return starts, ends
 
 
+def _true_spans(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    padded = np.concatenate([[False], np.asarray(mask, dtype=bool), [False]])
+    transitions = np.diff(padded.astype(int))
+    return np.flatnonzero(transitions > 0), np.flatnonzero(transitions < 0)
+
+
+def _disp_tf(v: np.ndarray) -> np.ndarray:
+    """Apply display transform (negate X, swap Y/Z) to vectors."""
+
+    out = np.array(v, copy=True)
+    out[..., 0] = -out[..., 0]
+    out[..., [1, 2]] = out[..., [2, 1]]
+    return out
+
+
+def _disp_axes(matrix: np.ndarray, scale: float) -> np.ndarray:
+    return _disp_tf((matrix * scale).T).T
+
+
 def plot_skeleton(
     pos: np.ndarray,
     ori: np.ndarray,
     frame: int = 0,
     gravity: np.ndarray | None = None,
     gravity_ref: np.ndarray | None = None,
-    gravity_len: float = _GRAVITY_LEN,
     figsize: tuple[int, int] = (14, 10),
 ) -> None:
     """Draw a 3D skeleton with bone connections, joint axes, labels, and
@@ -90,9 +107,7 @@ def plot_skeleton(
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111, projection='3d')
 
-    p = pos.copy()
-    p[:, 0] = -p[:, 0]
-    p[:, [1, 2]] = p[:, [2, 1]]
+    p = _disp_tf(pos)
 
     center = (p.max(axis=0) + p.min(axis=0)) / 2
     extent = max(p.max(axis=0) - p.min(axis=0)) * 0.4
@@ -125,9 +140,7 @@ def plot_skeleton(
     for i, name in enumerate(bones):
         R = Rotation.from_quat(ori[i]).as_matrix()
         for axis_idx, color in enumerate(['red', 'green', 'blue']):
-            v = R[:, axis_idx] * _AXIS_LEN
-            v[0] = -v[0]
-            v[[1, 2]] = v[[2, 1]]
+            v = _disp_tf(R[:, axis_idx] * _AXIS_LEN)
             ax.plot([p[i, 0], p[i, 0] + v[0]],
                     [p[i, 1], p[i, 1] + v[1]],
                     [p[i, 2], p[i, 2] + v[2]],
@@ -139,9 +152,7 @@ def plot_skeleton(
             g = grav[i]
             g_norm = np.linalg.norm(g)
             if g_norm > 1e-8:
-                g_dir = g / g_norm * gravity_len
-                g_dir[0] = -g_dir[0]
-                g_dir[[1, 2]] = g_dir[[2, 1]]
+                g_dir = _disp_tf(g / g_norm * _GRAVITY_LEN)
                 ax.quiver(*p[i], *g_dir, color='blue', alpha=0.7,
                           linewidth=2, arrow_length_ratio=0.15)
 
@@ -149,9 +160,7 @@ def plot_skeleton(
             g = grav_ref[i]
             g_norm = np.linalg.norm(g)
             if g_norm > 1e-8:
-                g_dir = g / g_norm * gravity_len
-                g_dir[0] = -g_dir[0]
-                g_dir[[1, 2]] = g_dir[[2, 1]]
+                g_dir = _disp_tf(g / g_norm * _GRAVITY_LEN)
                 ax.quiver(*p[i], *g_dir, color='cyan', alpha=0.7,
                           linewidth=2, arrow_length_ratio=0.15)
 
@@ -186,22 +195,16 @@ def plot_skeleton(
 
 def _slerp_arc(a: np.ndarray, b: np.ndarray, radius: float, n: int = 32) -> np.ndarray:
     """3-D spherical arc from unit vector *a* to *b* at *radius*."""
+    a_norm = np.linalg.norm(a)
+    b_norm = np.linalg.norm(b)
+    if a_norm < 1e-12 or b_norm < 1e-12:
+        return np.empty((0, 3))
+    a = np.asarray(a) / a_norm
+    b = np.asarray(b) / b_norm
     angle = np.arccos(np.clip(np.dot(a, b), -1.0, 1.0))
     if angle < 1e-6:
         return np.empty((0, 3))
-    t = np.linspace(0, 1, n)
-    return radius * (
-        np.sin((1 - t)[:, None] * angle) * a[None, :]
-        + np.sin(t[:, None] * angle) * b[None, :]
-    ) / np.sin(angle)
-
-
-def _disp_tf(v: np.ndarray) -> np.ndarray:
-    """Apply display transform (negate X, swap Y↔Z) to a vector."""
-    out = v.copy()
-    out[0] = -out[0]
-    out[[1, 2]] = out[[2, 1]]
-    return out
+    return geometric_slerp(a, b, np.linspace(0, 1, n)) * radius
 
 
 def plot_bone_pair(
@@ -251,14 +254,8 @@ def plot_bone_pair(
     ax.set_zlim(-ext, ext)
     ax.set_axis_off()
 
-    def _ax_cols(R):
-        cols = R * axlen
-        cols[0] = -cols[0]
-        cols[[1, 2]] = cols[[2, 1]]
-        return cols
-
-    parent_axes = _ax_cols(np.eye(3))
-    child_axes = _ax_cols(Rotation.from_quat(q_rel).as_matrix())
+    parent_axes = _disp_axes(np.eye(3), axlen)
+    child_axes = _disp_axes(Rotation.from_quat(q_rel).as_matrix(), axlen)
 
     colors = ['red', 'green', 'blue']
     axis_labels = ['X', 'Y', 'Z']
@@ -430,7 +427,7 @@ def plot_bone_with_violations(
     if rpy is not None:
         angles = rpy[:, child_idx, :]
     else:
-        angles = Rotation.from_quat(local_quats[:, child_idx, None]).as_euler('xyz', degrees=True)[:, 0, :]
+        angles = Rotation.from_quat(local_quats[:, child_idx]).as_euler('xyz', degrees=True)
 
     n_frames = len(angles)
     if violated is not None:
@@ -489,20 +486,14 @@ def plot_bone_with_violations(
         if ax_masks is not None:
             axis_idx = {"r": 0, "p": 1, "y": 2}[lim_label]
             mask = ax_masks[:, axis_idx]
-            padded = np.concatenate([[False], mask, [False]])
-            transitions = np.diff(padded.astype(int))
-            for s, e in zip(np.flatnonzero(transitions > 0), np.flatnonzero(transitions < 0)):
+            for s, e in zip(*_true_spans(mask)):
                 ax.axvspan(s, e, color="red", alpha=0.12, lw=0)
         elif bone_mask is not None:
-            padded = np.concatenate([[False], bone_mask, [False]])
-            transitions = np.diff(padded.astype(int))
-            for s, e in zip(np.flatnonzero(transitions > 0), np.flatnonzero(transitions < 0)):
+            for s, e in zip(*_true_spans(bone_mask)):
                 ax.axvspan(s, e, color="red", alpha=0.12, lw=0)
 
         if grav_mask is not None:
-            padded = np.concatenate([[False], grav_mask, [False]])
-            transitions = np.diff(padded.astype(int))
-            for s, e in zip(np.flatnonzero(transitions > 0), np.flatnonzero(transitions < 0)):
+            for s, e in zip(*_true_spans(grav_mask)):
                 ax.axvspan(s, e, color="blue", alpha=0.12, lw=0)
 
         if limits is not None:

@@ -1,27 +1,22 @@
-"""Skeleton schema definitions, data container, and column extractors.
+"""Skeleton schema definitions and DataFrame column extractors.
 
 Provides the ``Skeleton`` hierarchy class, plus concrete definitions for
-both the NatNet (19-bone) and sensorsuit bone sets, bone-name aliases
+both the NatNet (19-bone) and sensorsuit bone sets, bone-name mappings
 between them, and helpers to extract rotation / position / gravity
 arrays from parquet DataFrames.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
-
-import re
-import numpy as np
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from scipy.spatial.transform import Rotation
+
+import numpy as np
 
 if TYPE_CHECKING:
     import pandas as pd
 
-# ---------------------------------------------------------------------------
 # Skeleton schema - immutable hierarchy definition
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Skeleton:
     """Immutable skeleton hierarchy definition.
@@ -103,10 +98,7 @@ class Skeleton:
         return cls(names=names, parent=parent)
 
 
-# ---------------------------------------------------------------------------
 # NatNet (19-bone) skeleton  —  single source of truth
-# ---------------------------------------------------------------------------
-
 NATNET_DEF: list[tuple[str, str | None]] = [
     ("Hip", None),
     ("Ab", "Hip"),
@@ -131,26 +123,13 @@ NATNET_DEF: list[tuple[str, str | None]] = [
 
 NATNET = Skeleton.from_parent_pairs(NATNET_DEF)
 
-# ---------------------------------------------------------------------------
-# Backward-compatible NatNet aliases  (used by detector, transforms, viz)
-# ---------------------------------------------------------------------------
+LINKS: list[tuple[str, str]] = [
+    (child, NATNET.names[parent])
+    for child, parent in zip(NATNET.names, NATNET.parent)
+    if parent >= 0
+]
 
-NATNET_BONES: list[str] = list(NATNET.names)
-NUM_BONES: int = len(NATNET)
-ROOT_INDEX: int = 0
-PARENT_INDICES: list[int] = list(NATNET.parent)
-CHILDREN: list[list[int]] = [list(c) for c in NATNET.children]
-
-NATNET_PARENT: dict[str, str | None] = {}
-for i, p in enumerate(PARENT_INDICES):
-    NATNET_PARENT[NATNET_BONES[i]] = NATNET_BONES[p] if p >= 0 else None
-
-LINKS: list[tuple[str, str]] = [(c, p) for c, p in NATNET_PARENT.items() if p is not None]
-
-# ---------------------------------------------------------------------------
 # Sensorsuit skeleton  (body / v3_fullbody bones)
-# ---------------------------------------------------------------------------
-
 SENSORSUIT_DEF: list[tuple[str, str | None]] = [
     ("lower_back", None),
     ("chest", "lower_back"),
@@ -203,138 +182,62 @@ SENSORSUIT_TO_NATNET: dict[str, str] = {
     "foot_right": "RFoot",
 }
 
-# ---------------------------------------------------------------------------
 # Column extractors  (stream-based, default to ``natnet_*``)
-# ---------------------------------------------------------------------------
+def extract(
+    df: "pd.DataFrame",
+    bones: list[str],
+    field: str,
+    *,
+    stream: str = "natnet",
+    axes: str = "xyz",
+    missing: str = "drop",
+) -> np.ndarray:
+    """Read ``{stream}_{bone}_{field}_{axis}`` columns into an array."""
+
+    if missing not in {"drop", "raise"}:
+        raise ValueError("missing must be 'drop' or 'raise'")
+
+    selected = [
+        bone
+        for bone in bones
+        if all(f"{stream}_{bone}_{field}_{axis}" in df.columns for axis in axes)
+    ]
+    if missing == "raise" and len(selected) != len(bones):
+        missing_cols = [
+            f"{stream}_{bone}_{field}_{axis}"
+            for bone in bones
+            for axis in axes
+            if f"{stream}_{bone}_{field}_{axis}" not in df.columns
+        ]
+        raise KeyError(f"missing columns: {missing_cols}")
+
+    if not selected:
+        return np.empty((len(df), 0, len(axes)))
+
+    cols = [f"{stream}_{bone}_{field}_{axis}" for bone in selected for axis in axes]
+    return df[cols].to_numpy().reshape(-1, len(selected), len(axes))
 
 
 def extract_rotations(
-    df: "pd.DataFrame", bones: list[str], stream: str = "natnet",
+    df: "pd.DataFrame",
+    bones: list[str],
+    stream: str = "natnet",
     suffix: str | None = None,
 ) -> np.ndarray:
-    """Read quaternion columns from a parquet DataFrame.
+    """Read quaternion columns in xyzw order."""
 
-    Column names follow the convention ``{stream}_{bone}_{suffix}_{xyzw}``.
-    ``suffix`` defaults to ``"orientation"`` when *stream* is ``"sensorsuit"``,
-    ``"rotation"`` otherwise.
-    Only bones that have all four axis columns present in *df* are
-    included; missing bones are silently dropped.
-
-    Returns
-    -------
-    quats:
-        (n_frames, n_bones, 4) in xyzw order.
-    """
     if suffix is None:
         suffix = "orientation" if stream == "sensorsuit" else "rotation"
-    exist = {b for b in bones
-             if all(f"{stream}_{b}_{suffix}_{a}" in df.columns for a in "xyzw")}
-    bones = [b for b in bones if b in exist]
-    if not bones:
-        return np.empty((len(df), 0, 4))
-    cols = [f"{stream}_{b}_{suffix}_{a}" for b in bones for a in "xyzw"]
-    return df[cols].values.reshape(-1, len(bones), 4)
+    return extract(df, bones, suffix, stream=stream, axes="xyzw")
 
 
-def extract_positions(
-    df: "pd.DataFrame", bones: list[str], stream: str = "natnet"
-) -> np.ndarray:
-    """Read position columns from a parquet DataFrame.
+def extract_positions(df: "pd.DataFrame", bones: list[str], stream: str = "natnet") -> np.ndarray:
+    """Read position columns in xyz order."""
 
-    Column names follow the convention ``{stream}_{bone}_position_{xyz}``.
-
-    Returns
-    -------
-    pos:
-        (n_frames, n_bones, 3) in xyz order.
-    """
-    cols = [f"{stream}_{b}_position_{a}" for b in bones for a in "xyz"]
-    return df[cols].values.reshape(-1, len(bones), 3)
+    return extract(df, bones, "position", stream=stream, axes="xyz", missing="raise")
 
 
-def extract_gravity(
-    df: "pd.DataFrame", bones: list[str], stream: str = "sensorsuit"
-) -> np.ndarray:
-    """Read gravity-vector columns from a parquet DataFrame.
+def extract_gravity(df: "pd.DataFrame", bones: list[str], stream: str = "sensorsuit") -> np.ndarray:
+    """Read gravity-vector columns in xyz order."""
 
-    Column names follow the convention ``{stream}_{bone}_gravity_{xyz}``.
-    Only bones that have all three axis columns present in *df* are
-    included; missing bones are silently dropped.
-
-    Returns
-    -------
-    gravity:
-        (n_frames, n_bones, 3) in xyz order.
-    """
-    exist = {b for b in bones
-             if all(f"{stream}_{b}_gravity_{a}" in df.columns for a in "xyz")}
-    bones = [b for b in bones if b in exist]
-    if not bones:
-        return np.empty((len(df), 0, 3))
-    cols = [f"{stream}_{b}_gravity_{a}" for b in bones for a in "xyz"]
-    return df[cols].values.reshape(-1, len(bones), 3)
-
-
-# ---------------------------------------------------------------------------
-# Per-frame data container
-# ---------------------------------------------------------------------------
-@dataclass
-class NatNetSkeleton:
-    """Per-frame NatNet skeleton data.
-
-    Parameters
-    ----------
-    global_orientations:
-        (n_frames, N, 4) or (n_frames, N*4) in xyzw.
-    global_positions:
-        (n_frames, N, 3) or (n_frames, N*3), optional.
-    """
-
-    global_orientations: np.ndarray
-    global_positions: Optional[np.ndarray] = None
-    _skeleton: Skeleton = field(default_factory=lambda: NATNET, repr=False)
-
-    def __post_init__(self) -> None:
-        from src.utils.transforms import global_to_local
-
-        skel = self._skeleton
-        ori = self.global_orientations
-        if ori.ndim < 2 or ori.shape[-1] not in (4, len(skel) * 4):
-            raise ValueError(
-                f"global_orientations shape must be (n_frames, N*4) or "
-                f"(n_frames, N, 4); got {ori.shape}"
-            )
-        self.local_orientations = global_to_local(ori)
-        if self.local_orientations.shape[-1] != 4:
-            self.local_orientations = self.local_orientations.reshape(
-                *self.local_orientations.shape[:-1], len(skel), 4
-            )
-
-        if self.global_positions is not None:
-            pos = self.global_positions
-            expected = len(skel) * 3
-            if pos.ndim < 2 or pos.shape[-1] not in (3, expected):
-                raise ValueError(
-                    f"global_positions last dim must be {expected} or 3; got {pos.shape}"
-                )
-
-    @property
-    def n_frames(self) -> int:
-        return self.global_orientations.shape[0]
-
-    @property
-    def n_bones(self) -> int:
-        return len(self._skeleton)
-
-    @property
-    def skeleton(self) -> Skeleton:
-        return self._skeleton
-
-    def global_ori(self, frame: int | slice, bone: int | None = None) -> np.ndarray:
-        data = self.global_orientations[frame]
-        return data[..., bone, :] if bone is not None else data
-
-    def local_ori(self, frame: int | slice, bone: int | None = None) -> np.ndarray:
-        data = self.local_orientations[frame]
-        return data[..., bone, :] if bone is not None else data
-    
+    return extract(df, bones, "gravity", stream=stream, axes="xyz")

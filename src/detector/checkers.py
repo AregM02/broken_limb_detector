@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Any, NamedTuple
-
 import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
 
-from src.skeletons.natnet_skeleton import NATNET, extract_positions, extract_rotations
+from src.skeletons.natnet_skeleton import NATNET, extract_rotations
 from src.utils.gravity import compute_gravity_vectors, cosine_similarity
 from src.utils.transforms import global_to_local
 
@@ -24,22 +21,7 @@ ABSOLUTE_LIMITS: dict[str, tuple[tuple[float, float], tuple[float, float], tuple
 END_EFFECTOR_BONES: tuple[str, ...] = tuple(ABSOLUTE_LIMITS)
 
 
-class CheckerResult(NamedTuple):
-    """Result payload from one checker."""
-
-    violated: np.ndarray
-    details: dict[str, Any]
-
-
-class BaseChecker(ABC):
-    """Base class for detector validation checks."""
-
-    @abstractmethod
-    def check(self, df: pd.DataFrame) -> CheckerResult:
-        """Run the checker on a tracking DataFrame."""
-
-
-class AbsoluteLimitChecker(BaseChecker):
+class AbsoluteLimitChecker:
     """Validate local joint angles against absolute RPY limits."""
 
     def __init__(
@@ -52,10 +34,11 @@ class AbsoluteLimitChecker(BaseChecker):
         self.calibrate = calibrate
         self.tpose_window = tpose_window
 
-    def check(self, df: pd.DataFrame) -> CheckerResult:
+    def check(self, df: pd.DataFrame) -> np.ndarray:
         quats = extract_rotations(df, list(NATNET.names))
-        pos = extract_positions(df, list(NATNET.names))
-        local_quats, _ = global_to_local(quats, pos)
+        if quats.shape[1] != len(NATNET):
+            raise ValueError("missing one or more NatNet rotation columns")
+        local_quats = global_to_local(quats)
 
         if self.calibrate and self.tpose_window > 0:
             n = min(self.tpose_window, local_quats.shape[0])
@@ -65,34 +48,20 @@ class AbsoluteLimitChecker(BaseChecker):
         rpy = Rotation.from_quat(local_quats).as_euler("xyz", degrees=True)
         n_frames, n_bones, _ = rpy.shape
         violated = np.zeros((n_frames, n_bones), dtype=bool)
-        violated_axes = np.zeros((n_frames, n_bones, 3), dtype=bool)
 
         for key, axes in self.limits.items():
             bone_idx = NATNET.index(key) if isinstance(key, str) else key
             if bone_idx >= n_bones:
                 continue
 
-            (r_lo, r_hi), (p_lo, p_hi), (y_lo, y_hi) = axes
+            bounds = np.asarray(axes)
             bone_rpy = rpy[:, bone_idx, :]
-            axis_violations = np.stack(
-                [
-                    (bone_rpy[:, 0] < r_lo) | (bone_rpy[:, 0] > r_hi),
-                    (bone_rpy[:, 1] < p_lo) | (bone_rpy[:, 1] > p_hi),
-                    (bone_rpy[:, 2] < y_lo) | (bone_rpy[:, 2] > y_hi),
-                ],
-                axis=1,
-            )
+            violated[:, bone_idx] = ((bone_rpy < bounds[:, 0]) | (bone_rpy > bounds[:, 1])).any(axis=1)
 
-            violated_axes[:, bone_idx] = axis_violations
-            violated[:, bone_idx] = axis_violations.any(axis=1)
-
-        return CheckerResult(
-            violated=violated,
-            details={"violated_axes": violated_axes, "rpy": rpy, "limits": self.limits},
-        )
+        return violated
 
 
-class GravityAlignmentChecker(BaseChecker):
+class GravityAlignmentChecker:
     """Compare the gravity-fit NatNet path against constant NatNet-world gravity."""
 
     def __init__(
@@ -110,8 +79,8 @@ class GravityAlignmentChecker(BaseChecker):
             if bone not in NATNET.names:
                 raise ValueError(f"unknown NatNet bone {bone!r}")
 
-    def check(self, df: pd.DataFrame) -> CheckerResult:
-        gravity, gravity_ref, mapping = compute_gravity_vectors(
+    def check(self, df: pd.DataFrame) -> np.ndarray:
+        gravity, gravity_ref, _ = compute_gravity_vectors(
             df,
             calibration_start=self.calibration_start,
             calibration_window=self.calibration_window,
@@ -119,8 +88,6 @@ class GravityAlignmentChecker(BaseChecker):
         )
         n_frames, n_bones, _ = gravity.shape
         violated = np.zeros((n_frames, n_bones), dtype=bool)
-        angular_errors = np.full((n_frames, n_bones), np.nan)
-        cosine_scores = np.full((n_frames, n_bones), np.nan)
 
         valid = (
             (np.linalg.norm(gravity, axis=2) > 1e-8)
@@ -128,18 +95,5 @@ class GravityAlignmentChecker(BaseChecker):
         )
         cos_theta = np.clip(cosine_similarity(gravity, gravity_ref), -1.0, 1.0)
 
-        cosine_scores[valid] = cos_theta[valid]
-        angular_errors[valid] = np.degrees(np.arccos(cos_theta[valid]))
         violated[valid] = cos_theta[valid] < self.threshold_cos
-
-        return CheckerResult(
-            violated=violated,
-            details={
-                "angular_errors": angular_errors,
-                "cosine_similarity": cosine_scores,
-                "mapping": mapping,
-                "valid": valid,
-                "bones": self.bones,
-                "threshold_cos": self.threshold_cos,
-            },
-        )
+        return violated

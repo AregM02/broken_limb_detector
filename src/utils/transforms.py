@@ -1,10 +1,4 @@
-"""Pure-numpy NatNet global↔local (parent-relative) quaternion transforms.
-
-Functions
----------
-global_to_local  — world-frame quaternions → parent-relative
-local_to_global  — parent-relative → world-frame
-"""
+"""NatNet world-frame to parent-relative quaternion transforms."""
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -23,32 +17,10 @@ def _as_bone_view(q: np.ndarray, dim: int = 4) -> np.ndarray:
     if last == n * dim:
         return q.reshape(*leading, n, dim)
     if last == dim:
+        if not leading or leading[-1] != n:
+            raise ValueError(f"Expected {n} bones before last dim {dim}, got shape {q.shape}")
         return q
     raise ValueError(f"Expected last dim {n * dim} or {dim}, got {last}")
-
-
-def _transform(
-    orientations_xyzw: np.ndarray,
-    use_kinematic_chain: bool,
-    to_local: bool,
-) -> np.ndarray:
-    view = _as_bone_view(orientations_xyzw)
-    parents = _effective_parents(use_kinematic_chain)
-    parts: list[np.ndarray] = []
-    num_bones = len(NATNET)
-    for j in range(num_bones):
-        q_j = view[..., j, :]
-        p = parents[j]
-        if p < 0:
-            parts.append(q_j)
-        elif to_local:
-            q_p_inv = Rotation.from_quat(view[..., p, :]).inv().as_quat()
-            parts.append((Rotation.from_quat(q_p_inv) * Rotation.from_quat(q_j)).as_quat())
-        else:
-            q_parent = parts[p]
-            parts.append((Rotation.from_quat(q_parent) * Rotation.from_quat(q_j)).as_quat())
-    result = np.stack(parts, axis=-2)
-    return result.reshape(orientations_xyzw.shape)
 
 
 def global_to_local(
@@ -97,12 +69,11 @@ def global_to_local(
             if pos_parts is not None:
                 pos_parts.append(pos_view[..., j, :])
         else:
-            q_p_inv = Rotation.from_quat(view[..., p, :]).inv().as_quat()
-            quat_parts.append((Rotation.from_quat(q_p_inv) * Rotation.from_quat(q_j)).as_quat())
+            parent_inv = Rotation.from_quat(view[..., p, :]).inv()
+            quat_parts.append((parent_inv * Rotation.from_quat(q_j)).as_quat())
             if pos_parts is not None:
-                R_p_inv = Rotation.from_quat(q_p_inv).as_matrix()
                 disp = pos_view[..., j, :] - pos_view[..., p, :]
-                pos_parts.append((R_p_inv @ disp[..., None])[..., 0])
+                pos_parts.append(parent_inv.apply(disp))
 
     local_quats = np.stack(quat_parts, axis=-2)
     local_quats = local_quats.reshape(orientations_xyzw.shape)
@@ -113,11 +84,3 @@ def global_to_local(
         return local_quats, local_pos
 
     return local_quats
-
-
-def local_to_global(
-    orientations_xyzw: np.ndarray,
-    use_kinematic_chain: bool = True,
-) -> np.ndarray:
-    """Inverse of *global_to_local*; returns same shape as input."""
-    return _transform(orientations_xyzw, use_kinematic_chain, to_local=False)

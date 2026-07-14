@@ -1,16 +1,20 @@
 Broken Limb Detector
 ====================
 
-Use `main.py` as the single CLI entry point:
+Minimal checker library for NatNet broken-limb detection.
 
-```bash
-python main.py detect parquets/test_rhand.processed.parquet --no-plot
-python main.py skeleton parquets/test_rhand.processed.parquet --frame 1000
-python main.py cosine parquets/test_rhand.processed.parquet --bone RHand --threshold 0.8
+```python
+import pandas as pd
+
+from src.detector import detect
+
+df = pd.read_parquet("data/validation.parquet")
+events = detect(df)
 ```
 
-Commands:
+`events` contains one row per frame, boolean bone columns, a global `BROKEN`
+column, and a `checkers` list showing which checks raised anything in that
+frame.
 
-- `detect`: run the RPY limit checker and hand/foot gravity alignment checker.
-- `skeleton`: plot the NatNet skeleton with gravity overlays.
-- `cosine`: plot gravity-fit cosine similarity over time.
+Use the notebook for validation, threshold tuning, and plotting with
+`src.utils.visualization`.

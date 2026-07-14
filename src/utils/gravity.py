@@ -6,7 +6,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from src.skeletons.natnet_skeleton import NATNET, SENSORSUIT_TO_NATNET, extract_gravity, extract_rotations
-from src.skeletons.tf import NATNET_WORLD_GRAVITY
+
+NATNET_WORLD_GRAVITY = np.array([0.0, 9.81, 0.0])
 
 
 def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
@@ -52,7 +53,10 @@ def estimate_gravity_nn_R_ss(
     if start_frame < 0 or calibration_window <= 0 or start_frame >= stop_frame:
         raise ValueError("invalid gravity calibration window")
 
-    g_target_nn = np.einsum("nji,j->ni", wnn_R_nn[start_frame:stop_frame], gravity_wnn)
+    g_target_nn = Rotation.from_matrix(wnn_R_nn[start_frame:stop_frame]).apply(
+        gravity_wnn,
+        inverse=True,
+    )
 
     rotation, _ = Rotation.align_vectors(
         normalize_vectors(g_target_nn),
@@ -121,10 +125,9 @@ def compute_gravity_vectors(
             calibration_window=int(calibration_valid.sum()),
         )
 
-        wnn_R_nn = Rotation.from_quat(q_nn[valid]).as_matrix()
         g_ss_valid = g_ss[valid]
-        g_nn = np.einsum("ij,nj->ni", nn_R_ss, g_ss_valid)
-        gravity[valid, bone_idx] = np.einsum("nij,nj->ni", wnn_R_nn, g_nn)
+        g_nn = Rotation.from_matrix(nn_R_ss).apply(g_ss_valid)
+        gravity[valid, bone_idx] = Rotation.from_quat(q_nn[valid]).apply(g_nn)
         gravity_ref[valid, bone_idx] = NATNET_WORLD_GRAVITY
 
     return gravity, gravity_ref, mapping
