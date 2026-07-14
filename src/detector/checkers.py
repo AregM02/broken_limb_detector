@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
@@ -21,7 +23,22 @@ ABSOLUTE_LIMITS: dict[str, tuple[tuple[float, float], tuple[float, float], tuple
 END_EFFECTOR_BONES: tuple[str, ...] = tuple(ABSOLUTE_LIMITS)
 
 
-class AbsoluteLimitChecker:
+class BaseChecker(ABC):
+    def check(self, df: pd.DataFrame) -> np.ndarray:
+        mask = self._check(df)
+        expected = (len(df), len(NATNET))
+        if mask.shape != expected:
+            raise ValueError(f"{self.__class__.__name__} returned mask shape {mask.shape}, expected {expected}")
+        if mask.dtype != bool:
+            raise TypeError(f"{self.__class__.__name__} must return a boolean mask")
+        return mask
+
+    @abstractmethod
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
+        raise NotImplementedError
+
+
+class AbsoluteLimitChecker(BaseChecker):
     """Validate local joint angles against absolute RPY limits."""
 
     def __init__(
@@ -34,7 +51,7 @@ class AbsoluteLimitChecker:
         self.calibrate = calibrate
         self.tpose_window = tpose_window
 
-    def check(self, df: pd.DataFrame) -> np.ndarray:
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
         quats = extract_rotations(df, list(NATNET.names))
         if quats.shape[1] != len(NATNET):
             raise ValueError("missing one or more NatNet rotation columns")
@@ -61,7 +78,7 @@ class AbsoluteLimitChecker:
         return violated
 
 
-class GravityAlignmentChecker:
+class GravityAlignmentChecker(BaseChecker):
     """Compare the gravity-fit NatNet path against constant NatNet-world gravity."""
 
     def __init__(
@@ -79,7 +96,7 @@ class GravityAlignmentChecker:
             if bone not in NATNET.names:
                 raise ValueError(f"unknown NatNet bone {bone!r}")
 
-    def check(self, df: pd.DataFrame) -> np.ndarray:
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
         gravity, gravity_ref, _ = compute_gravity_vectors(
             df,
             calibration_start=self.calibration_start,

@@ -21,15 +21,12 @@ def detect(df: pd.DataFrame, checkers: list[object] | None = None) -> pd.DataFra
 
     for checker in checkers:
         violated = checker.check(df)
-        if violated.shape != broken_bones.shape:
-            raise ValueError(f"{checker.__class__.__name__} returned mask shape {violated.shape}")
-
         checker_name = checker.__class__.__name__
-        broken_bones |= violated
+        broken_bones |= violated  # OR combination
         for frame in np.flatnonzero(violated.any(axis=1)):
             frame_checkers[int(frame)].add(checker_name)
 
-    result = pd.DataFrame(broken_bones, columns=bones)
+    result = pd.DataFrame(broken_bones, columns=[f"Broken{bone}" for bone in bones])
     result["broken"] = broken_bones.any(axis=1)
     result["checkers"] = [sorted(names) for names in frame_checkers]
     return result
