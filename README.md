@@ -16,5 +16,4 @@ events = detect(df)
 column, and a `checkers` list showing which checks raised anything in that
 frame.
 
-Use the notebook for validation, threshold tuning, and plotting with
-`src.utils.visualization`.
+Use the notebook for validation, and plotting with `src.utils.visualization`.
