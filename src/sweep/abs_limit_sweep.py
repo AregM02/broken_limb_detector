@@ -1,5 +1,6 @@
 """Does a margin sweep for the limits of the absolute limit checker."""
 
+import argparse
 from functools import partial
 from itertools import product
 from multiprocessing import Pool
@@ -9,11 +10,10 @@ import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
 
-from src.detector.checkers import ABSOLUTE_LIMITS, AbsoluteLimitChecker
-from src.skeletons.natnet_skeleton import NATNET
+from ..detector.checkers import ABSOLUTE_LIMITS, AbsoluteLimitChecker
+from ..skeletons.natnet_skeleton import NATNET
 
 
-# Set margins to test. All combinations of these will be tried for every limit.
 MARGIN_VALUES = (-3., -2., -1., 0., 1., 2., 3.)
 MARGIN_COLUMNS = (
     "lower_x",
@@ -28,6 +28,7 @@ MARGIN_COLUMNS = (
 def search_bone_margins(
     df: pd.DataFrame,
     labels: pd.DataFrame,
+    margins: list[float],
     bone: str,
 ) -> pd.DataFrame:
     checker = AbsoluteLimitChecker(
@@ -35,30 +36,33 @@ def search_bone_margins(
         calibrate=True,
         tpose_window=1500,
     )
+
     bone_idx = NATNET.index(bone)
     y_true = labels[f"label_Broken{bone}"].to_numpy(bool)
     rows = []
     best_f1 = 0.0
 
     progress = tqdm(
-        product(MARGIN_VALUES, repeat=6),
-        total=len(MARGIN_VALUES) ** 6,
+        product(margins, repeat=6),
+        total=len(margins) ** 6,
         desc=f"Optimizing {bone}",
         unit="config",
         position=list(ABSOLUTE_LIMITS).index(bone),
         leave=True,
         dynamic_ncols=True,
     )
+
     for values in progress:
-        margins = np.asarray(values).reshape(3, 2)
-        checker.margins = {bone: margins}
+        checker.margins = {bone: np.asarray(values).reshape(3, 2)}
         y_pred = checker.check(df)[:, bone_idx]
+
         precision, recall, f1, _ = precision_recall_fscore_support(
             y_true,
             y_pred,
             average="binary",
             zero_division=0,
         )
+
         if f1 > best_f1:
             best_f1 = f1
             progress.set_postfix(
@@ -67,6 +71,7 @@ def search_bone_margins(
                 recall=f"{recall:.3f}",
                 refresh=False,
             )
+
         rows.append(
             {
                 "bone": bone,
@@ -76,23 +81,45 @@ def search_bone_margins(
                 "f1": f1,
             }
         )
+
     return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
-    # Load validation data
-    df = pd.read_parquet("data/validation.parquet")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filename")
+    parser.add_argument(
+        "--margins",
+        type=float,
+        nargs="+",
+        default=MARGIN_VALUES,
+    )
+    args = parser.parse_args()
+
+    df = pd.read_parquet(args.filename)
     labels = df.filter(regex=r"^label_Broken").notna()
 
-    search = partial(search_bone_margins, df, labels)
+    search = partial(search_bone_margins, df, labels, args.margins)
+
     with Pool(processes=len(ABSOLUTE_LIMITS)) as pool:
-        results = pd.concat(pool.map(search, ABSOLUTE_LIMITS), ignore_index=True)
+        results = pd.concat(
+            pool.map(search, ABSOLUTE_LIMITS),
+            ignore_index=True,
+        )
 
     results["total_margin"] = results[list(MARGIN_COLUMNS)].sum(axis=1)
+
     best = (
-        results.sort_values(["bone", "f1", "total_margin"], ascending=[True, False, True])
+        results.sort_values(
+            ["bone", "f1", "total_margin"],
+            ascending=[True, False, True],
+        )
         .groupby("bone", as_index=False)
         .first()
     )
 
-    print(best[["bone", *MARGIN_COLUMNS, "precision", "recall", "f1"]].to_string(index=False))
+    print(
+        best[
+            ["bone", *MARGIN_COLUMNS, "precision", "recall", "f1"]
+        ].to_string(index=False)
+    )
