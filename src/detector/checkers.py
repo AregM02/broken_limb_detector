@@ -13,6 +13,7 @@ from src.utils.gravity import compute_gravity_vectors, cosine_similarity
 from src.utils.transforms import global_to_local
 
 
+# Extrinsic rotations around fixed parent frame XYZ axes
 ABSOLUTE_LIMITS: dict[str, tuple[tuple[float, float], tuple[float, float], tuple[float, float]]] = {
     # "RHand": ((-45, 45), (-45, 40), (-105, 80)),
     "RHand": ((-60, 50), (-50, 40), (-105, 80)),
@@ -46,10 +47,12 @@ class AbsoluteLimitChecker(BaseChecker):
         limits: dict[str | int, tuple[tuple[float, float], tuple[float, float], tuple[float, float]]] | None = None,
         calibrate: bool = False,
         tpose_window: int = 600,
+        plot: bool = False,
     ):
         self.limits = limits if limits is not None else ABSOLUTE_LIMITS
         self.calibrate = calibrate
         self.tpose_window = tpose_window
+        self.plot = plot
 
     def _check(self, df: pd.DataFrame) -> np.ndarray:
         quats = extract_rotations(df, list(NATNET.names))
@@ -74,6 +77,11 @@ class AbsoluteLimitChecker(BaseChecker):
             bounds = np.asarray(axes)
             bone_rpy = rpy[:, bone_idx, :]
             violated[:, bone_idx] = ((bone_rpy < bounds[:, 0]) | (bone_rpy > bounds[:, 1])).any(axis=1)
+
+            if self.plot:
+                from src.utils.visualization import plot_violations
+
+                plot_violations(NATNET[bone_idx], local_quats, violated[:, bone_idx], bounds)
 
         return violated
 

@@ -1,52 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 from scipy.spatial import geometric_slerp
 from scipy.spatial.transform import Rotation
-from src.skeletons.natnet_skeleton import NATNET, LINKS
+from src.skeletons.natnet_skeleton import LINKS, NATNET, extract_positions, extract_rotations
 
 _AXIS_LEN = 0.15
 
 
 _GRAVITY_LEN = 0.2
-
-
-def _debounced_true_edges(mask: np.ndarray, off_gap: int) -> tuple[list[int], list[int]]:
-    """Return true-run starts and confirmed ends, merging short false gaps."""
-
-    starts: list[int] = []
-    ends: list[int] = []
-    in_run = False
-    pending_end: int | None = None
-    off_count = 0
-
-    for frame, is_on in enumerate(np.asarray(mask, dtype=bool)):
-        if is_on:
-            if not in_run:
-                starts.append(frame)
-                in_run = True
-            pending_end = None
-            off_count = 0
-            continue
-
-        if not in_run:
-            continue
-
-        if pending_end is None:
-            pending_end = frame
-        off_count += 1
-        if off_count >= off_gap:
-            ends.append(pending_end)
-            in_run = False
-            pending_end = None
-            off_count = 0
-
-    return starts, ends
-
-
-def _true_spans(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    padded = np.concatenate([[False], np.asarray(mask, dtype=bool), [False]])
-    transitions = np.diff(padded.astype(int))
-    return np.flatnonzero(transitions > 0), np.flatnonzero(transitions < 0)
 
 
 def _disp_tf(v: np.ndarray) -> np.ndarray:
@@ -63,8 +25,7 @@ def _disp_axes(matrix: np.ndarray, scale: float) -> np.ndarray:
 
 
 def plot_skeleton(
-    pos: np.ndarray,
-    ori: np.ndarray,
+    df: pd.DataFrame,
     frame: int = 0,
     gravity: np.ndarray | None = None,
     gravity_ref: np.ndarray | None = None,
@@ -84,10 +45,8 @@ def plot_skeleton(
 
     Parameters
     ----------
-    pos:
-        (n_frames, n_bones, 3) global positions.
-    ori:
-        (n_frames, n_bones, 4) global orientations in xyzw.
+    df:
+        DataFrame containing NatNet position and rotation columns.
     frame:
         Frame index to plot.
     gravity:
@@ -96,13 +55,12 @@ def plot_skeleton(
     gravity_ref:
         (n_frames, n_bones, 3) or (n_bones, 3) NatNet-world reference gravity
         vectors. Drawn as cyan arrows for comparison.
-    gravity_len:
-        Display length of the gravity arrows (in data coordinates).
     figsize:
         Figure size passed to ``plt.figure()``.
     """
-    pos = pos[frame]
-    ori = ori[frame]
+    bones = list(NATNET.names)
+    pos = extract_positions(df, bones)[frame]
+    ori = extract_rotations(df, bones)[frame]
 
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111, projection='3d')
@@ -115,9 +73,8 @@ def plot_skeleton(
     ax.set_ylim(center[1] - extent, center[1] + extent)
     ax.set_zlim(center[2] - extent, center[2] + extent)
     ax.set_axis_off()
-    ax.set_title(f"Frame {frame} ({len(pos)} total)")
+    ax.set_title(f"Frame {frame} ({len(df)} total)")
 
-    bones = list(NATNET.names)
     for child, parent in LINKS:
         ci, pi = bones.index(child), bones.index(parent)
         ax.plot(*zip(p[pi], p[ci]), color='gray', linewidth=2)
@@ -139,14 +96,17 @@ def plot_skeleton(
 
     for i, name in enumerate(bones):
         R = Rotation.from_quat(ori[i]).as_matrix()
+        axis_vectors = _disp_axes(R, _AXIS_LEN)
         for axis_idx, color in enumerate(['red', 'green', 'blue']):
-            v = _disp_tf(R[:, axis_idx] * _AXIS_LEN)
+            v = axis_vectors[:, axis_idx]
             ax.plot([p[i, 0], p[i, 0] + v[0]],
                     [p[i, 1], p[i, 1] + v[1]],
                     [p[i, 2], p[i, 2] + v[2]],
                     color=color, alpha=0.5, linewidth=1)
         ax.scatter(*p[i], color='steelblue', s=12)
-        ax.text(*p[i], name, size=7, ha='center', va='bottom')
+        label_pos = p[i] + axis_vectors.sum(axis=1) * 0.4
+        ax.text(*label_pos, name, size=8, ha='left', va='bottom',
+                bbox=dict(facecolor='white', edgecolor='none', alpha=0.6, pad=1))
 
         if grav is not None:
             g = grav[i]
@@ -320,213 +280,35 @@ def plot_bone_pair(
     plt.close(fig)
 
 
-def plot_child_in_parent(
-    child_name: str,
+def plot_violations(
+    bone_name: str,
     local_quats: np.ndarray,
+    violated: np.ndarray,
+    limits: np.ndarray,
 ) -> None:
-    """Plot rotation-axis histogram + axis-specific angle time series for one bone."""
-    child_idx = NATNET.index(child_name)
-    parent_idx = NATNET.parent_of(child_idx)
-    if parent_idx < 0:
-        raise ValueError(f"{child_name} is the root — no parent frame.")
-    parent_name = NATNET[parent_idx]
+    """Plot parent-relative RPY angles and highlight predicted violations."""
 
-    q = local_quats[:, child_idx, :]
+    angles = Rotation.from_quat(local_quats[:, NATNET.index(bone_name)]).as_euler("xyz", degrees=True)
+    frames = np.arange(len(local_quats))
 
-    xv, yv, zv = q[:, 0], q[:, 1], q[:, 2]
-    norm = np.sqrt(xv*xv + yv*yv + zv*zv) + 1e-12
-    ax_x, ax_y, ax_z = xv / norm, yv / norm, zv / norm
-
-    rv = Rotation.from_quat(q).as_rotvec()
-    rv_deg = np.rad2deg(rv)
-
-    # Using 6 rows for better vertical control; right side plots span 2 rows each
-    fig = plt.figure(figsize=(10, 12), constrained_layout=True)
-    gs = fig.add_gridspec(6, 2, width_ratios=[1, 1.8], hspace=0.1)
-    
-    ax_hist = fig.add_subplot(gs[:, 0])
-    # Define subplots with sharex for cleaner look
-    ax1 = fig.add_subplot(gs[0:2, 1])
-    ax2 = fig.add_subplot(gs[2:4, 1], sharex=ax1)
-    ax3 = fig.add_subplot(gs[4:6, 1], sharex=ax1)
-    axes = [ax1, ax2, ax3]
-    
-    colors = ['#d62728', '#2ca02c', '#1f77b4']
-    labels = ['x', 'y', 'z']
-
-    # Histogram
-    bins = np.linspace(0, 1, 40)
-    ax_hist.hist(np.abs(ax_x), bins=bins, alpha=0.5, label='x', color=colors[0])
-    ax_hist.hist(np.abs(ax_y), bins=bins, alpha=0.5, label='y', color=colors[1])
-    ax_hist.hist(np.abs(ax_z), bins=bins, alpha=0.5, label='z', color=colors[2])
-    ax_hist.set_xlim(0, 1)
-    ax_hist.set_xlabel("|dot| of rotation axis")
-    ax_hist.set_ylabel("frames")
-    ax_hist.set_title(f"{child_name} in {parent_name}")
-    ax_hist.legend(fontsize=8)
-
-    # Time series
-    for ax, rv_i, c, lbl in zip(axes, rv_deg.T, colors, labels):
-        ax.plot(rv_i, lw=0.4, color=c, alpha=0.7)
-        ax.axhline(0, color='gray', ls='-', lw=0.3)
-        ax.set_ylabel(f"angle_{lbl} (deg)")
-        
-    axes[-1].set_xlabel("frames")
-    axes[0].set_title(f"{child_name} rotation per axis")
-
-    plt.show()
-
-
-def plot_bone_with_violations(
-    child_name: str,
-    local_quats: np.ndarray | None = None,
-    violated: np.ndarray | None = None,
-    violated_axes: np.ndarray | None = None,
-    limits: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
-    rpy: np.ndarray | None = None,
-    gravity_violated: np.ndarray | None = None,
-    figsize: tuple[float, float] = (12, 6),
-    broken_end_off_gap: int = 1000,
-    plot_broken_edges: bool = True,
-) -> None:
-    """Time series of roll/pitch/yaw for one bone with violation markers.
-
-    Parameters
-    ----------
-    child_name:
-        Name of the bone to plot.
-    local_quats:
-        (n_frames, n_bones, 4) parent-relative quaternions.
-        Not needed when *rpy* is provided.
-    violated:
-        (n_frames,) or (n_frames, n_bones) boolean mask of violations.
-        If 2-D, the bone column is selected automatically and red spans
-        are drawn on all three axes when *violated_axes* is not given.
-    violated_axes:
-        (n_frames, n_bones, 3) or (n_frames, 3) per-axis violation mask.
-        When given, each subplot only highlights its own axis.
-    limits:
-        Optional ``((r_lo, r_hi), (p_lo, p_hi), (y_lo, y_hi))`` to draw
-        as horizontal dashed lines.
-    rpy:
-        Pre-computed RPY array (n_frames, n_bones, 3).  Computed from
-        *local_quats* when *None*.
-    gravity_violated:
-        (n_frames,) or (n_frames, n_bones) boolean mask of gravity
-        alignment violations.  Drawn as blue vertical spans.
-    figsize:
-        Figure size passed to ``plt.figure()``.
-    broken_end_off_gap:
-        Number of consecutive non-broken frames required before drawing a
-        ``broken_end`` marker. Shorter off-gaps are treated as oscillation.
-    plot_broken_edges:
-        Draw debounced ``broken_start`` and ``broken_end`` vertical markers.
-    """
-    child_idx = NATNET.index(child_name)
-
-    if rpy is not None:
-        angles = rpy[:, child_idx, :]
-    else:
-        angles = Rotation.from_quat(local_quats[:, child_idx]).as_euler('xyz', degrees=True)
-
-    n_frames = len(angles)
-    if violated is not None:
-        if violated.ndim == 2:
-            bone_mask = violated[:, child_idx]
-        else:
-            bone_mask = violated
-        bone_mask = np.asarray(bone_mask, dtype=bool)
-    else:
-        bone_mask = None
-
-    if violated_axes is not None:
-        if violated_axes.ndim == 3:
-            ax_masks = violated_axes[:, child_idx, :]
-        else:
-            ax_masks = violated_axes
-    else:
-        ax_masks = None
-
-    if gravity_violated is not None:
-        if gravity_violated.ndim == 2:
-            grav_mask = gravity_violated[:, child_idx]
-        else:
-            grav_mask = gravity_violated
-    else:
-        grav_mask = None
-
-    colors = ["#d62728", "#2ca02c", "#1f77b4"]
-    axis_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
-    limit_labels = ["r", "p", "y"]
-
-    broken_starts: list[int] = []
-    broken_ends: list[int] = []
-    marker_mask = None
-    if plot_broken_edges:
-        marker_mask = bone_mask if bone_mask is not None else None
-        if marker_mask is None and ax_masks is not None:
-            marker_mask = np.any(ax_masks, axis=1)
-
-    if plot_broken_edges and marker_mask is not None:
-        broken_starts, broken_ends = _debounced_true_edges(
-            marker_mask,
-            max(1, int(broken_end_off_gap)),
-        )
-
-    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
-    fig.suptitle(f"{child_name} — RPY time series", fontsize=13)
-
-    for ax, angle_i, color, label, lim_label in zip(
-        axes, angles.T, colors, axis_labels, limit_labels
+    fig, axes = plt.subplots(3, 1, figsize=(12, 6), sharex=True)
+    for axis, values, label, (lower, upper) in zip(
+        axes,
+        angles.T,
+        ("Roll (X)", "Pitch (Y)", "Yaw (Z)"),
+        limits,
     ):
-        ax.plot(angle_i, lw=0.5, color=color, alpha=0.7)
-        ax.axhline(0, color="gray", ls="-", lw=0.3)
-        ax.set_ylabel(f"{label} (deg)")
+        axis.plot(frames, values, linewidth=0.7)
+        axis.scatter(frames[violated], values[violated], color="red", s=6, label="Violation")
+        axis.axhline(lower, color="black", linestyle="--", linewidth=0.8)
+        axis.axhline(upper, color="black", linestyle="--", linewidth=0.8)
+        axis.set_ylabel(f"{label} [deg]")
+        axis.grid(alpha=0.2)
 
-        if ax_masks is not None:
-            axis_idx = {"r": 0, "p": 1, "y": 2}[lim_label]
-            mask = ax_masks[:, axis_idx]
-            for s, e in zip(*_true_spans(mask)):
-                ax.axvspan(s, e, color="red", alpha=0.12, lw=0)
-        elif bone_mask is not None:
-            for s, e in zip(*_true_spans(bone_mask)):
-                ax.axvspan(s, e, color="red", alpha=0.12, lw=0)
-
-        if grav_mask is not None:
-            for s, e in zip(*_true_spans(grav_mask)):
-                ax.axvspan(s, e, color="blue", alpha=0.12, lw=0)
-
-        if limits is not None:
-            axis_idx = {"r": 0, "p": 1, "y": 2}[lim_label]
-            ax.axhline(limits[axis_idx][0], color=color, ls="--", lw=0.8, alpha=0.6)
-            ax.axhline(limits[axis_idx][1], color=color, ls="--", lw=0.8, alpha=0.6)
-
-        for idx, start in enumerate(broken_starts):
-            ax.axvline(
-                start,
-                color="black",
-                ls="--",
-                lw=1.0,
-                alpha=0.85,
-                zorder=4,
-                label="broken_start" if ax is axes[0] and idx == 0 else "_nolegend_",
-            )
-        for idx, end in enumerate(broken_ends):
-            ax.axvline(
-                end,
-                color="dimgray",
-                ls="--",
-                lw=1.0,
-                alpha=0.85,
-                zorder=4,
-                label="broken_end" if ax is axes[0] and idx == 0 else "_nolegend_",
-            )
-
+    axes[0].legend()
     axes[-1].set_xlabel("Frame")
-    if broken_starts or broken_ends:
-        axes[0].legend(loc="upper right", fontsize=8)
-
-    plt.tight_layout()
+    fig.suptitle(f"{bone_name} parent-relative RPY")
+    fig.tight_layout()
     plt.show()
     plt.close(fig)
 
