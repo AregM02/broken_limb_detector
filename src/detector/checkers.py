@@ -16,8 +16,8 @@ from src.utils.visualization import plot_violations
 
 # Extrinsic rotations around fixed parent frame XYZ axes
 ABSOLUTE_LIMITS: dict[str, np.ndarray] = {
-    "RHand": np.array([[-45, 33], [-33, 36], [-88, 63]], dtype=float),
-    "LHand": np.array([[-50, 43], [-24, 33], [-63, 88]], dtype=float),
+    "RHand": np.array([[-45, 50], [-33, 36], [-88, 63]], dtype=float),
+    "LHand": np.array([[-50, 43], [-36, 33], [-63, 88]], dtype=float),
     "RFoot": np.array([[-22, 44], [-73, 48.5], [-85, 66]], dtype=float),
     "LFoot": np.array([[-15, 52], [-43, 73], [-23, 43]], dtype=float),
 }
@@ -25,7 +25,11 @@ END_EFFECTOR_BONES: tuple[str, ...] = tuple(ABSOLUTE_LIMITS)
 
 
 class BaseChecker(ABC):
+    """Base interface for checkers that return one boolean value per frame and bone."""
+
     def check(self, df: pd.DataFrame) -> np.ndarray:
+        """Run the checker and validate its full-skeleton boolean mask."""
+
         mask = self._check(df)
         expected = (len(df), len(NATNET))
         if mask.shape != expected:
@@ -36,6 +40,14 @@ class BaseChecker(ABC):
 
     @abstractmethod
     def _check(self, df: pd.DataFrame) -> np.ndarray:
+        """Implement the checker-specific classification logic."""
+
+        raise NotImplementedError
+
+    @abstractmethod
+    def _diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Return checker-specific continuous values and classifications."""
+
         raise NotImplementedError
 
 
@@ -104,7 +116,9 @@ class AbsoluteLimitChecker(BaseChecker):
         self._cached_rpy = rpy
         return local_quats, rpy
 
-    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+    def _diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Return calibrated orientations, RPY values, limits, and excesses."""
+
         local_quats, rpy = self._get_quats_and_rpy(df)
         n_frames, n_bones, _ = rpy.shape
         violated = np.zeros((n_frames, n_bones), dtype=bool)
@@ -132,7 +146,7 @@ class AbsoluteLimitChecker(BaseChecker):
         }
 
     def _check(self, df: pd.DataFrame) -> np.ndarray:
-        details = self.diagnostics(df)
+        details = self._diagnostics(df)
 
         if self.plot:
             for key in self.limits:
@@ -228,7 +242,9 @@ class GravityAlignmentChecker(BaseChecker):
         counts = np.convolve(mask.astype(int), kernel, mode="full")[:len(mask)]
         return counts >= self.temporal_required
 
-    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+    def _diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Return gravity vectors, validity, alignment errors, and classifications."""
+
         gravity, gravity_ref, valid, cos_theta = self._get_gravity_info(df)
         raw_violated = np.zeros(valid.shape, dtype=bool)
         raw_violated[valid] = cos_theta[valid] < self.threshold_cos
@@ -255,4 +271,4 @@ class GravityAlignmentChecker(BaseChecker):
         }
 
     def _check(self, df: pd.DataFrame) -> np.ndarray:
-        return self.diagnostics(df)["violated"]
+        return self._diagnostics(df)["violated"]
