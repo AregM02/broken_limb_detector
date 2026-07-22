@@ -141,22 +141,42 @@ class GravityAlignmentChecker(BaseChecker):
         for bone in self.bones:
             if bone not in NATNET.names:
                 raise ValueError(f"unknown NatNet bone {bone!r}")
+        self._cached_df: pd.DataFrame | None = None
+        self._cached_config: tuple[int, int, tuple[str, ...]] | None = None
+        self._cached_valid: np.ndarray | None = None
+        self._cached_cosine: np.ndarray | None = None
 
-    def _check(self, df: pd.DataFrame) -> np.ndarray:
+    def clear_cache(self) -> None:
+        self._cached_df = None
+        self._cached_config = None
+        self._cached_valid = None
+        self._cached_cosine = None
+
+    def _get_cosine(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        config = (self.calibration_start, self.calibration_window, self.bones)
+        if self._cached_df is df and self._cached_config == config:
+            return self._cached_valid, self._cached_cosine
+
         gravity, gravity_ref, _ = compute_gravity_vectors(
             df,
             calibration_start=self.calibration_start,
             calibration_window=self.calibration_window,
             bone_names=self.bones,
         )
-        n_frames, n_bones, _ = gravity.shape
-        violated = np.zeros((n_frames, n_bones), dtype=bool)
-
         valid = (
             (np.linalg.norm(gravity, axis=2) > 1e-8)
             & (np.linalg.norm(gravity_ref, axis=2) > 1e-8)
         )
         cos_theta = np.clip(cosine_similarity(gravity, gravity_ref), -1.0, 1.0)
 
+        self._cached_df = df
+        self._cached_config = config
+        self._cached_valid = valid
+        self._cached_cosine = cos_theta
+        return valid, cos_theta
+
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
+        valid, cos_theta = self._get_cosine(df)
+        violated = np.zeros(valid.shape, dtype=bool)
         violated[valid] = cos_theta[valid] < self.threshold_cos
         return violated

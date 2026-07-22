@@ -1,8 +1,7 @@
-"""Does a margin sweep for the limits of the absolute limit checker."""
+"""Sweep gravity cosine thresholds and report the best F1 per bone."""
 
 import argparse
 from functools import partial
-from itertools import product
 from multiprocessing import Pool
 
 import numpy as np
@@ -10,52 +9,37 @@ import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
 
-from ..detector.checkers import ABSOLUTE_LIMITS, AbsoluteLimitChecker
+from ..detector.checkers import END_EFFECTOR_BONES, GravityAlignmentChecker
 from ..skeletons.natnet_skeleton import NATNET
 
 
-MARGIN_VALUES = (-4, -3., -2., -1., 0., 1., 2., 3., 4)
-MARGIN_COLUMNS = (
-    "lower_x",
-    "upper_x",
-    "lower_y",
-    "upper_y",
-    "lower_z",
-    "upper_z",
-)
+DEFAULT_THRESHOLDS = np.linspace(0.5, 0.99, 100)
 
 
-def search_bone_margins(
+def search_bone_thresholds(
     df: pd.DataFrame,
     labels: pd.DataFrame,
-    margins: list[float],
+    thresholds: list[float],
     bone: str,
 ) -> pd.DataFrame:
-    checker = AbsoluteLimitChecker(
-        limits={bone: ABSOLUTE_LIMITS[bone]},
-        calibrate=True,
-        tpose_window=1500,
-    )
-
+    checker = GravityAlignmentChecker(bones=[bone])
     bone_idx = NATNET.index(bone)
     y_true = labels[f"label_Broken{bone}"].to_numpy(bool)
     rows = []
     best_f1 = 0.0
 
     progress = tqdm(
-        product(margins, repeat=6),
-        total=len(margins) ** 6,
+        thresholds,
         desc=f"Optimizing {bone}",
-        unit="config",
-        position=list(ABSOLUTE_LIMITS).index(bone),
+        unit="threshold",
+        position=END_EFFECTOR_BONES.index(bone),
         leave=True,
         dynamic_ncols=True,
     )
 
-    for values in progress:
-        checker.margins = {bone: np.asarray(values).reshape(3, 2)}
+    for threshold in progress:
+        checker.threshold_cos = threshold
         y_pred = checker.check(df)[:, bone_idx]
-
         precision, recall, f1, _ = precision_recall_fscore_support(
             y_true,
             y_pred,
@@ -75,7 +59,8 @@ def search_bone_margins(
         rows.append(
             {
                 "bone": bone,
-                **dict(zip(MARGIN_COLUMNS, values)),
+                "threshold_cos": threshold,
+                "threshold_deg": np.degrees(np.arccos(threshold)),
                 "precision": precision,
                 "recall": recall,
                 "f1": f1,
@@ -89,30 +74,30 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("filename")
     parser.add_argument(
-        "--margins",
+        "--thresholds",
         type=float,
         nargs="+",
-        default=MARGIN_VALUES,
+        default=DEFAULT_THRESHOLDS,
     )
     args = parser.parse_args()
 
+    if any(not -1 <= threshold <= 1 for threshold in args.thresholds):
+        parser.error("thresholds must be between -1 and 1")
+
     df = pd.read_parquet(args.filename)
     labels = df.filter(regex=r"^label_Broken").notna()
+    search = partial(search_bone_thresholds, df, labels, args.thresholds)
 
-    search = partial(search_bone_margins, df, labels, args.margins)
-
-    with Pool(processes=len(ABSOLUTE_LIMITS)) as pool:
+    with Pool(processes=len(END_EFFECTOR_BONES)) as pool:
         results = pd.concat(
-            pool.map(search, ABSOLUTE_LIMITS),
+            pool.map(search, END_EFFECTOR_BONES),
             ignore_index=True,
         )
 
-    results["total_margin"] = results[list(MARGIN_COLUMNS)].sum(axis=1)
-
     best = (
         results.sort_values(
-            ["bone", "f1", "total_margin"],
-            ascending=[True, False, True],
+            ["bone", "f1", "precision"],
+            ascending=[True, False, False],
         )
         .groupby("bone", as_index=False)
         .first()
@@ -120,6 +105,6 @@ if __name__ == "__main__":
 
     print(
         best[
-            ["bone", *MARGIN_COLUMNS, "precision", "recall", "f1"]
+            ["bone", "threshold_cos", "threshold_deg", "precision", "recall", "f1"]
         ].to_string(index=False)
     )
