@@ -133,11 +133,19 @@ class GravityAlignmentChecker(BaseChecker):
         calibration_start: int = 0,
         calibration_window: int = 600,
         bones: tuple[str, ...] | list[str] | None = None,
+        temporal_filter: bool = False,
+        temporal_window: int = 40,
+        temporal_required: int = 15,
     ):
         self.threshold_cos = threshold_cos
         self.calibration_start = calibration_start
         self.calibration_window = calibration_window
         self.bones = END_EFFECTOR_BONES if bones is None else tuple(bones)
+        self.temporal_filter = temporal_filter
+        self.temporal_window = temporal_window
+        self.temporal_required = temporal_required
+        if not 1 <= temporal_required <= temporal_window:
+            raise ValueError("temporal_required must be between 1 and temporal_window")
         for bone in self.bones:
             if bone not in NATNET.names:
                 raise ValueError(f"unknown NatNet bone {bone!r}")
@@ -163,6 +171,7 @@ class GravityAlignmentChecker(BaseChecker):
             calibration_window=self.calibration_window,
             bone_names=self.bones,
         )
+
         valid = (
             (np.linalg.norm(gravity, axis=2) > 1e-8)
             & (np.linalg.norm(gravity_ref, axis=2) > 1e-8)
@@ -175,8 +184,20 @@ class GravityAlignmentChecker(BaseChecker):
         self._cached_cosine = cos_theta
         return valid, cos_theta
 
+    def _confirm_over_time(self, mask: np.ndarray) -> np.ndarray:
+        kernel = np.ones(self.temporal_window, dtype=int)
+        counts = np.convolve(mask.astype(int), kernel, mode="full")[:len(mask)]
+        return counts >= self.temporal_required
+
     def _check(self, df: pd.DataFrame) -> np.ndarray:
         valid, cos_theta = self._get_cosine(df)
         violated = np.zeros(valid.shape, dtype=bool)
         violated[valid] = cos_theta[valid] < self.threshold_cos
+        if self.temporal_filter:
+            for bone in self.bones:
+                bone_idx = NATNET.index(bone)
+                violated[:, bone_idx] = (
+                    self._confirm_over_time(violated[:, bone_idx])
+                    & valid[:, bone_idx]
+                )
         return violated
