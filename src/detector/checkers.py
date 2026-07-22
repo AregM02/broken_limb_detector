@@ -104,10 +104,12 @@ class AbsoluteLimitChecker(BaseChecker):
         self._cached_rpy = rpy
         return local_quats, rpy
 
-    def _check(self, df: pd.DataFrame) -> np.ndarray:
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
         local_quats, rpy = self._get_quats_and_rpy(df)
         n_frames, n_bones, _ = rpy.shape
         violated = np.zeros((n_frames, n_bones), dtype=bool)
+        axis_excess = np.full((n_frames, n_bones, 3), np.nan)
+        effective_limits = np.full((n_bones, 3, 2), np.nan)
 
         for key in self.limits:
             bone_idx = NATNET.index(key) if isinstance(key, str) else key
@@ -116,12 +118,35 @@ class AbsoluteLimitChecker(BaseChecker):
 
             bounds = self._effective_bounds(key)
             bone_rpy = rpy[:, bone_idx, :]
-            violated[:, bone_idx] = ((bone_rpy < bounds[:, 0]) | (bone_rpy > bounds[:, 1])).any(axis=1)
+            excess = np.maximum(bounds[:, 0] - bone_rpy, bone_rpy - bounds[:, 1])
+            axis_excess[:, bone_idx] = excess
+            effective_limits[bone_idx] = bounds
+            violated[:, bone_idx] = (excess > 0).any(axis=1)
 
-            if self.plot:
-                plot_violations(NATNET[bone_idx], local_quats, violated[:, bone_idx], bounds)
+        return {
+            "violated": violated,
+            "local_quaternions": local_quats,
+            "rpy": rpy,
+            "axis_excess": axis_excess,
+            "effective_limits": effective_limits,
+        }
 
-        return violated
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
+        details = self.diagnostics(df)
+
+        if self.plot:
+            for key in self.limits:
+                bone_idx = NATNET.index(key) if isinstance(key, str) else key
+                if bone_idx >= len(NATNET):
+                    continue
+                plot_violations(
+                    NATNET[bone_idx],
+                    details["local_quaternions"],
+                    details["violated"][:, bone_idx],
+                    details["effective_limits"][bone_idx],
+                )
+
+        return details["violated"]
 
 
 class GravityAlignmentChecker(BaseChecker):
@@ -151,19 +176,31 @@ class GravityAlignmentChecker(BaseChecker):
                 raise ValueError(f"unknown NatNet bone {bone!r}")
         self._cached_df: pd.DataFrame | None = None
         self._cached_config: tuple[int, int, tuple[str, ...]] | None = None
+        self._cached_gravity: np.ndarray | None = None
+        self._cached_gravity_ref: np.ndarray | None = None
         self._cached_valid: np.ndarray | None = None
         self._cached_cosine: np.ndarray | None = None
 
     def clear_cache(self) -> None:
         self._cached_df = None
         self._cached_config = None
+        self._cached_gravity = None
+        self._cached_gravity_ref = None
         self._cached_valid = None
         self._cached_cosine = None
 
-    def _get_cosine(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    def _get_gravity_info(
+        self,
+        df: pd.DataFrame,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         config = (self.calibration_start, self.calibration_window, self.bones)
         if self._cached_df is df and self._cached_config == config:
-            return self._cached_valid, self._cached_cosine
+            return (
+                self._cached_gravity,
+                self._cached_gravity_ref,
+                self._cached_valid,
+                self._cached_cosine,
+            )
 
         gravity, gravity_ref, _ = compute_gravity_vectors(
             df,
@@ -180,19 +217,23 @@ class GravityAlignmentChecker(BaseChecker):
 
         self._cached_df = df
         self._cached_config = config
+        self._cached_gravity = gravity
+        self._cached_gravity_ref = gravity_ref
         self._cached_valid = valid
         self._cached_cosine = cos_theta
-        return valid, cos_theta
+        return gravity, gravity_ref, valid, cos_theta
 
     def _confirm_over_time(self, mask: np.ndarray) -> np.ndarray:
         kernel = np.ones(self.temporal_window, dtype=int)
         counts = np.convolve(mask.astype(int), kernel, mode="full")[:len(mask)]
         return counts >= self.temporal_required
 
-    def _check(self, df: pd.DataFrame) -> np.ndarray:
-        valid, cos_theta = self._get_cosine(df)
-        violated = np.zeros(valid.shape, dtype=bool)
-        violated[valid] = cos_theta[valid] < self.threshold_cos
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        gravity, gravity_ref, valid, cos_theta = self._get_gravity_info(df)
+        raw_violated = np.zeros(valid.shape, dtype=bool)
+        raw_violated[valid] = cos_theta[valid] < self.threshold_cos
+        violated = raw_violated.copy()
+
         if self.temporal_filter:
             for bone in self.bones:
                 bone_idx = NATNET.index(bone)
@@ -200,4 +241,18 @@ class GravityAlignmentChecker(BaseChecker):
                     self._confirm_over_time(violated[:, bone_idx])
                     & valid[:, bone_idx]
                 )
-        return violated
+
+        angular_error = np.full(cos_theta.shape, np.nan)
+        angular_error[valid] = np.degrees(np.arccos(cos_theta[valid]))
+        return {
+            "violated": violated,
+            "raw_violated": raw_violated,
+            "valid": valid,
+            "cosine": cos_theta,
+            "angular_error": angular_error,
+            "gravity": gravity,
+            "gravity_reference": gravity_ref,
+        }
+
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
+        return self.diagnostics(df)["violated"]
