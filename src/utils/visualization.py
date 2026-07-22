@@ -313,6 +313,58 @@ def plot_violations(
     plt.close(fig)
 
 
+def plot_angular_velocity(
+    bone_name: str,
+    angular_speed: np.ndarray,
+    violated: np.ndarray,
+    threshold_rad_s: float,
+) -> None:
+    """Plot parent-relative angular speed and highlight detected breaks."""
+
+    frames = np.arange(len(angular_speed))
+    fig, axis = plt.subplots(figsize=(12, 3))
+    axis.plot(frames, angular_speed, linewidth=0.7)
+    axis.scatter(frames[violated], angular_speed[violated], color="red", s=6, label="Violation")
+    axis.axhline(threshold_rad_s, color="black", linestyle="--", linewidth=0.8)
+    axis.set_xlabel("Frame")
+    axis.set_ylabel("Angular speed [rad/s]")
+    axis.set_title(f"{bone_name} parent-relative angular speed")
+    axis.grid(alpha=0.2)
+    axis.legend()
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_linear_acceleration(
+    bone_name: str,
+    acceleration_magnitude: np.ndarray,
+    violated: np.ndarray,
+    threshold_m_s2: float,
+) -> None:
+    """Plot parent-relative linear acceleration and highlight detected breaks."""
+
+    frames = np.arange(len(acceleration_magnitude))
+    fig, axis = plt.subplots(figsize=(12, 3))
+    axis.plot(frames, acceleration_magnitude, linewidth=0.7)
+    axis.scatter(
+        frames[violated],
+        acceleration_magnitude[violated],
+        color="red",
+        s=6,
+        label="Violation",
+    )
+    axis.axhline(threshold_m_s2, color="black", linestyle="--", linewidth=0.8)
+    axis.set_xlabel("Frame")
+    axis.set_ylabel("Linear acceleration [m/s^2]")
+    axis.set_title(f"{bone_name} parent-relative linear acceleration")
+    axis.grid(alpha=0.2)
+    axis.legend()
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
 def plot_nn_vs_ss(
     rpy_nn: np.ndarray,
     rpy_ss: np.ndarray,

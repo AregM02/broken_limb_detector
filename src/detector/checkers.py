@@ -8,11 +8,14 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
 
-from src.skeletons.natnet_skeleton import NATNET, extract_rotations
+from src.skeletons.natnet_skeleton import NATNET, extract_positions, extract_rotations
 from src.utils.gravity import compute_gravity_vectors, cosine_similarity
 from src.utils.transforms import global_to_local
-from src.utils.visualization import plot_violations
-
+from src.utils.visualization import (
+    plot_angular_velocity,
+    plot_linear_acceleration,
+    plot_violations,
+)
 
 # Extrinsic rotations around fixed parent frame XYZ axes
 ABSOLUTE_LIMITS: dict[str, np.ndarray] = {
@@ -22,6 +25,30 @@ ABSOLUTE_LIMITS: dict[str, np.ndarray] = {
     "LFoot": np.array([[-15, 52], [-43, 73], [-23, 43]], dtype=float),
 }
 END_EFFECTOR_BONES: tuple[str, ...] = tuple(ABSOLUTE_LIMITS)
+
+# Maximum calibrated IMU acceleration magnitude in validation.parquet [m/s^2].
+# Ab and Neck use the nearest available IMUs: lower_back and head.
+LINEAR_ACCELERATION_LIMITS: dict[str, float] = {
+    "Hip": 29.583,
+    "Ab": 29.583,
+    "Chest": 17.942,
+    "Neck": 21.024,
+    "LShoulder": 27.288,
+    "RShoulder": 21.575,
+    "LUArm": 53.977,
+    "RUArm": 45.548,
+    "LFArm": 87.811,
+    "RFArm": 110.759,
+    "LHand": 106.266,
+    "RHand": 112.624,
+    "LThigh": 28.769,
+    "RThigh": 50.415,
+    "LShin": 41.114,
+    "RShin": 63.353,
+    "LFoot": 38.966,
+    "RFoot": 76.364,
+    "Head": 21.024,
+}
 
 
 class BaseChecker(ABC):
@@ -45,7 +72,7 @@ class BaseChecker(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
         """Return checker-specific continuous values and classifications."""
 
         raise NotImplementedError
@@ -116,7 +143,7 @@ class AbsoluteLimitChecker(BaseChecker):
         self._cached_rpy = rpy
         return local_quats, rpy
 
-    def _diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
         """Return calibrated orientations, RPY values, limits, and excesses."""
 
         local_quats, rpy = self._get_quats_and_rpy(df)
@@ -146,7 +173,7 @@ class AbsoluteLimitChecker(BaseChecker):
         }
 
     def _check(self, df: pd.DataFrame) -> np.ndarray:
-        details = self._diagnostics(df)
+        details = self.diagnostics(df)
 
         if self.plot:
             for key in self.limits:
@@ -242,7 +269,7 @@ class GravityAlignmentChecker(BaseChecker):
         counts = np.convolve(mask.astype(int), kernel, mode="full")[:len(mask)]
         return counts >= self.temporal_required
 
-    def _diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
         """Return gravity vectors, validity, alignment errors, and classifications."""
 
         gravity, gravity_ref, valid, cos_theta = self._get_gravity_info(df)
@@ -271,4 +298,125 @@ class GravityAlignmentChecker(BaseChecker):
         }
 
     def _check(self, df: pd.DataFrame) -> np.ndarray:
-        return self._diagnostics(df)["violated"]
+        return self.diagnostics(df)["violated"]
+
+
+class AngularVelocityChecker(BaseChecker):
+    """Detect implausibly fast parent-relative NatNet rotations."""
+
+    def __init__(
+        self,
+        threshold_rad_s: float = 10.0,
+        bones: tuple[str, ...] | list[str] | None = None,
+        plot: bool = False,
+    ):
+        self.threshold_rad_s = threshold_rad_s
+        self.bones = tuple(NATNET.names) if bones is None else tuple(bones)
+        self.plot = plot
+
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Return local angular velocities, speeds, and classifications."""
+
+        quats = extract_rotations(df, list(NATNET.names))
+        local_quats = global_to_local(quats)
+        angular_velocity = np.zeros((len(df), len(NATNET), 3))
+
+        if len(df) > 1:
+            dt_seconds = df["timestamp"].diff().dt.total_seconds().to_numpy()
+            previous = Rotation.from_quat(local_quats[:-1].reshape(-1, 4))
+            current = Rotation.from_quat(local_quats[1:].reshape(-1, 4))
+            rotation_vectors = (previous.inv() * current).as_rotvec()
+            rotation_vectors = rotation_vectors.reshape(len(df) - 1, len(NATNET), 3)
+            angular_velocity[1:] = rotation_vectors / dt_seconds[1:, None, None]
+
+        angular_speed = np.linalg.norm(angular_velocity, axis=2)
+        violated = np.zeros((len(df), len(NATNET)), dtype=bool)
+
+        for bone in self.bones:
+            bone_idx = NATNET.index(bone)
+            violated[:, bone_idx] = angular_speed[:, bone_idx] > self.threshold_rad_s
+
+        return {
+            "violated": violated,
+            "angular_velocity": angular_velocity,
+            "angular_speed": angular_speed,
+        }
+
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
+        details = self.diagnostics(df)
+
+        if self.plot:
+            for bone in self.bones:
+                bone_idx = NATNET.index(bone)
+                plot_angular_velocity(
+                    bone,
+                    details["angular_speed"][:, bone_idx],
+                    details["violated"][:, bone_idx],
+                    self.threshold_rad_s,
+                )
+
+        return details["violated"]
+
+
+class LinearAccelerationChecker(BaseChecker):
+    """Detect implausibly large parent-relative NatNet accelerations."""
+
+    def __init__(
+        self,
+        threshold_m_s2: float | dict[str, float] | None = None,
+        bones: tuple[str, ...] | list[str] | None = None,
+        plot: bool = False,
+    ):
+        self.bones = tuple(NATNET.names) if bones is None else tuple(bones)
+        if threshold_m_s2 is None:
+            self.thresholds = LINEAR_ACCELERATION_LIMITS
+        elif isinstance(threshold_m_s2, dict):
+            self.thresholds = threshold_m_s2
+        else:
+            self.thresholds = {bone: threshold_m_s2 for bone in self.bones}
+        self.plot = plot
+
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Return local linear accelerations, magnitudes, and classifications."""
+
+        quats = extract_rotations(df, list(NATNET.names))
+        positions = extract_positions(df, list(NATNET.names))
+        _, local_positions = global_to_local(quats, positions)
+        velocity = np.zeros_like(local_positions)
+        acceleration = np.zeros_like(local_positions)
+
+        if len(df) > 1:
+            dt_seconds = df["timestamp"].diff().dt.total_seconds().to_numpy()
+            velocity[1:] = np.diff(local_positions, axis=0) / dt_seconds[1:, None, None]
+
+        if len(df) > 2:
+            acceleration_dt = (dt_seconds[1:-1] + dt_seconds[2:]) / 2
+            acceleration[2:] = np.diff(velocity[1:], axis=0) / acceleration_dt[:, None, None]
+
+        acceleration_magnitude = np.linalg.norm(acceleration, axis=2)
+        violated = np.zeros((len(df), len(NATNET)), dtype=bool)
+
+        for bone in self.bones:
+            bone_idx = NATNET.index(bone)
+            violated[:, bone_idx] = acceleration_magnitude[:, bone_idx] > self.thresholds[bone]
+
+        return {
+            "violated": violated,
+            "linear_acceleration": acceleration,
+            "acceleration_magnitude": acceleration_magnitude,
+        }
+
+    def _check(self, df: pd.DataFrame) -> np.ndarray:
+        details = self.diagnostics(df)
+
+        if self.plot:
+            for bone in self.bones:
+                bone_idx = NATNET.index(bone)
+                plot_linear_acceleration(
+                    bone,
+                    details["acceleration_magnitude"][:, bone_idx],
+                    details["violated"][:, bone_idx],
+                    self.thresholds[bone],
+                )
+
+        return details["violated"]
