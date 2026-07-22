@@ -14,7 +14,7 @@ from ..detector.checkers import ABSOLUTE_LIMITS, AbsoluteLimitChecker
 from ..skeletons.natnet_skeleton import NATNET
 
 
-MARGIN_VALUES = (-4, -3., -2., -1., 0., 1., 2., 3., 4)
+MARGIN_VALUES = (-4, -3, -2., 2., 3., 4.)
 MARGIN_COLUMNS = (
     "lower_x",
     "upper_x",
@@ -34,7 +34,7 @@ def search_bone_margins(
     checker = AbsoluteLimitChecker(
         limits={bone: ABSOLUTE_LIMITS[bone]},
         calibrate=True,
-        tpose_window=1500,
+        tpose_window=500,
     )
 
     bone_idx = NATNET.index(bone)

@@ -16,10 +16,10 @@ from src.utils.visualization import plot_violations
 
 # Extrinsic rotations around fixed parent frame XYZ axes
 ABSOLUTE_LIMITS: dict[str, np.ndarray] = {
-    "RHand": np.array([[-57, 47], [-47, 38], [-102, 77]], dtype=float),
-    "LHand": np.array([[-47, 57], [-37, 47], [-77, 102]], dtype=float),
-    "RFoot": np.array([[-22, 47], [-87, 52.5], [-81, 59]], dtype=float),
-    "LFoot": np.array([[-22, 52], [-43, 87], [-37, 57]], dtype=float),
+    "RHand": np.array([[-45, 33], [-33, 36], [-88, 63]], dtype=float),
+    "LHand": np.array([[-50, 43], [-24, 33], [-63, 88]], dtype=float),
+    "RFoot": np.array([[-22, 44], [-73, 48.5], [-85, 66]], dtype=float),
+    "LFoot": np.array([[-15, 52], [-43, 73], [-23, 43]], dtype=float),
 }
 END_EFFECTOR_BONES: tuple[str, ...] = tuple(ABSOLUTE_LIMITS)
 

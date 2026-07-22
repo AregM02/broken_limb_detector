@@ -22,7 +22,7 @@ def search_bone_thresholds(
     thresholds: list[float],
     bone: str,
 ) -> pd.DataFrame:
-    checker = GravityAlignmentChecker(bones=[bone])
+    checker = GravityAlignmentChecker(bones=[bone], calibration_window=500)
     bone_idx = NATNET.index(bone)
     y_true = labels[f"label_Broken{bone}"].to_numpy(bool)
     rows = []
