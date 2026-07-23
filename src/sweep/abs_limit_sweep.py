@@ -33,6 +33,7 @@ def search_bone_margins(
 ) -> pd.DataFrame:
     checker = AbsoluteLimitChecker(
         limits={bone: ABSOLUTE_LIMITS[bone]},
+        bones=[bone],
         calibrate=True,
         tpose_window=500,
     )

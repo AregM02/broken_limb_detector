@@ -285,8 +285,9 @@ def plot_violations(
     local_quats: np.ndarray,
     violated: np.ndarray,
     limits: np.ndarray,
+    labels: np.ndarray | None = None,
 ) -> None:
-    """Plot parent-relative RPY angles and highlight predicted violations."""
+    """Plot parent-relative RPY angles, predictions, and available labels."""
 
     angles = Rotation.from_quat(local_quats[:, NATNET.index(bone_name)]).as_euler("xyz", degrees=True)
     frames = np.arange(len(local_quats))
@@ -299,6 +300,16 @@ def plot_violations(
         limits,
     ):
         axis.plot(frames, values, linewidth=0.7)
+        if labels is not None:
+            axis.scatter(
+                frames[labels],
+                values[labels],
+                color="orange",
+                marker="x",
+                s=16,
+                linewidth=0.8,
+                label="Label",
+            )
         axis.scatter(frames[violated], values[violated], color="red", s=6, label="Violation")
         axis.axhline(lower, color="black", linestyle="--", linewidth=0.8)
         axis.axhline(upper, color="black", linestyle="--", linewidth=0.8)
@@ -318,12 +329,23 @@ def plot_angular_velocity(
     angular_speed: np.ndarray,
     violated: np.ndarray,
     threshold_rad_s: float,
+    labels: np.ndarray | None = None,
 ) -> None:
-    """Plot parent-relative angular speed and highlight detected breaks."""
+    """Plot parent-relative angular speed, predictions, and available labels."""
 
     frames = np.arange(len(angular_speed))
     fig, axis = plt.subplots(figsize=(12, 3))
     axis.plot(frames, angular_speed, linewidth=0.7)
+    if labels is not None:
+        axis.scatter(
+            frames[labels],
+            angular_speed[labels],
+            color="orange",
+            marker="x",
+            s=16,
+            linewidth=0.8,
+            label="Label",
+        )
     axis.scatter(frames[violated], angular_speed[violated], color="red", s=6, label="Violation")
     axis.axhline(threshold_rad_s, color="black", linestyle="--", linewidth=0.8)
     axis.set_xlabel("Frame")
@@ -336,17 +358,68 @@ def plot_angular_velocity(
     plt.close(fig)
 
 
+def plot_angular_acceleration(
+    bone_name: str,
+    acceleration_magnitude: np.ndarray,
+    violated: np.ndarray,
+    threshold_rad_s2: float,
+    labels: np.ndarray | None = None,
+) -> None:
+    """Plot parent-relative angular acceleration, predictions, and available labels."""
+
+    frames = np.arange(len(acceleration_magnitude))
+    fig, axis = plt.subplots(figsize=(12, 3))
+    axis.plot(frames, acceleration_magnitude, linewidth=0.7)
+    if labels is not None:
+        axis.scatter(
+            frames[labels],
+            acceleration_magnitude[labels],
+            color="orange",
+            marker="x",
+            s=16,
+            linewidth=0.8,
+            label="Label",
+        )
+    axis.scatter(
+        frames[violated],
+        acceleration_magnitude[violated],
+        color="red",
+        s=6,
+        label="Violation",
+    )
+    axis.axhline(threshold_rad_s2, color="black", linestyle="--", linewidth=0.8)
+    axis.set_xlabel("Frame")
+    axis.set_ylabel("Angular acceleration [rad/s^2]")
+    axis.set_title(f"{bone_name} parent-relative angular acceleration")
+    axis.grid(alpha=0.2)
+    axis.legend()
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
 def plot_linear_acceleration(
     bone_name: str,
     acceleration_magnitude: np.ndarray,
     violated: np.ndarray,
     threshold_m_s2: float,
+    labels: np.ndarray | None = None,
 ) -> None:
-    """Plot parent-relative linear acceleration and highlight detected breaks."""
+    """Plot parent-relative linear acceleration, predictions, and available labels."""
 
     frames = np.arange(len(acceleration_magnitude))
     fig, axis = plt.subplots(figsize=(12, 3))
     axis.plot(frames, acceleration_magnitude, linewidth=0.7)
+    if labels is not None:
+        axis.scatter(
+            frames[labels],
+            acceleration_magnitude[labels],
+            color="orange",
+            marker="x",
+            s=16,
+            linewidth=0.8,
+            label="Label",
+        )
     axis.scatter(
         frames[violated],
         acceleration_magnitude[violated],
